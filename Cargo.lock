@@ -3865,6 +3865,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-plugin-font"
+version = "0.1.0"
+dependencies = [
+ "port-plugin-api",
+]
+
+[[package]]
 name = "port-plugin-transparency"
 version = "0.1.0"
 dependencies = [
