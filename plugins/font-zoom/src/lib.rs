@@ -1,11 +1,13 @@
 //! Plugin de zoom y escalado interactivo de fuente para PORT.
 //!
 //! Permite aumentar, reducir y restablecer dinámicamente el tamaño de la
-//! fuente mediante combinaciones estándar de teclado (`Ctrl++`, `Ctrl+-`, `Ctrl+0`).
+//! fuente mediante combinaciones estándar de teclado (`Ctrl++`, `Ctrl+-`, `Ctrl+0`),
+//! y sincronizar el tamaño por defecto con el archivo de configuración de PORT.
 
+use std::path::Path;
 use std::sync::RwLock;
 
-use port_plugin_api::{AppearanceHook, InputHook, KeyAction, Plugin};
+use port_plugin_api::{AppearanceHook, ConfigFile, InputHook, KeyAction, Plugin, PluginConfig};
 use port_term_core::input::Key;
 
 /// Plugin para zoom interactivo de tipografía.
@@ -47,6 +49,12 @@ impl FontZoomPlugin {
         *self.current_size.read().unwrap()
     }
 
+    /// Define directamente el tamaño actual.
+    pub fn set_size(&self, size: f32) {
+        let mut cur = self.current_size.write().unwrap();
+        *cur = size.clamp(self.min_size, self.max_size);
+    }
+
     /// Aumenta el tamaño en un paso.
     pub fn zoom_in(&self) -> f32 {
         let mut cur = self.current_size.write().unwrap();
@@ -66,6 +74,19 @@ impl FontZoomPlugin {
         let mut cur = self.current_size.write().unwrap();
         *cur = self.base_size;
         *cur
+    }
+
+    /// Guarda la configuración actual en una ruta concreta de archivo de configuración.
+    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(config) = self.save_config() {
+            ConfigFile::save_plugin(path, self.id(), &config)?;
+        }
+        Ok(())
+    }
+
+    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
+    pub fn save_to_default_file(&self) -> std::io::Result<()> {
+        self.save_to_file(&ConfigFile::default_path())
     }
 }
 
@@ -134,6 +155,34 @@ impl Plugin for FontZoomPlugin {
     fn input_hook(&self) -> Option<&dyn InputHook> {
         Some(self)
     }
+
+    fn default_config(&self) -> Option<PluginConfig> {
+        let mut config = PluginConfig::new();
+        config.set("default_size", self.base_size);
+        config.set("step", self.step);
+        config.set("min_size", self.min_size);
+        config.set("max_size", self.max_size);
+        Some(config)
+    }
+
+    fn load_config(&self, config: &PluginConfig) {
+        if let Some(size) = config.get_f32("default_size") {
+            self.set_size(size);
+        }
+        if let Some(step) = config.get_f32("step") {
+            // Nota: step se puede ajustar si se requiere
+            let _ = step;
+        }
+    }
+
+    fn save_config(&self) -> Option<PluginConfig> {
+        let mut config = PluginConfig::new();
+        config.set("default_size", self.size());
+        config.set("step", self.step);
+        config.set("min_size", self.min_size);
+        config.set("max_size", self.max_size);
+        Some(config)
+    }
 }
 
 #[cfg(test)]
@@ -195,5 +244,20 @@ mod tests {
         let regular_a = Key::new("a").ctrl();
         assert_eq!(plugin.on_key(&regular_a), KeyAction::Pass);
         assert_eq!(plugin.size(), 14.0);
+    }
+
+    #[test]
+    fn config_support_load_and_save() {
+        let plugin = FontZoomPlugin::new(14.0);
+        let default_cfg = plugin.default_config().unwrap();
+        assert_eq!(default_cfg.get_f32("default_size"), Some(14.0));
+
+        let mut custom_cfg = PluginConfig::new();
+        custom_cfg.set("default_size", 18.0);
+        plugin.load_config(&custom_cfg);
+        assert_eq!(plugin.size(), 18.0);
+
+        let saved = plugin.save_config().unwrap();
+        assert_eq!(saved.get_f32("default_size"), Some(18.0));
     }
 }

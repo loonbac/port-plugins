@@ -3,21 +3,23 @@
 //! Permite personalizar la familia de fuente, el tamaño y las fuentes
 //! de respaldo preferidas (ej. Nerd Fonts para iconos).
 
-use port_plugin_api::{AppearanceHook, Plugin};
+use std::path::Path;
+use std::sync::RwLock;
+
+use port_plugin_api::{AppearanceHook, ConfigFile, Plugin, PluginConfig};
 
 /// Plugin para configurar la tipografía de la terminal.
-#[derive(Debug, Clone)]
 pub struct FontPlugin {
-    family: &'static str,
+    family: RwLock<String>,
     size: Option<f32>,
     fallbacks: Option<Vec<String>>,
 }
 
 impl FontPlugin {
     /// Crea un nuevo plugin con la familia de fuente indicada (ej. "FiraCode Nerd Font Mono").
-    pub fn new(family: &'static str) -> Self {
+    pub fn new(family: impl Into<String>) -> Self {
         Self {
-            family,
+            family: RwLock::new(family.into()),
             size: None,
             fallbacks: None,
         }
@@ -34,11 +36,26 @@ impl FontPlugin {
         self.fallbacks = Some(fallbacks);
         self
     }
+
+    /// Guarda la configuración actual en una ruta concreta.
+    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(config) = self.save_config() {
+            ConfigFile::save_plugin(path, self.id(), &config)?;
+        }
+        Ok(())
+    }
+
+    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
+    pub fn save_to_default_file(&self) -> std::io::Result<()> {
+        self.save_to_file(&ConfigFile::default_path())
+    }
 }
 
 impl AppearanceHook for FontPlugin {
     fn font_family(&self) -> Option<&'static str> {
-        Some(self.family)
+        let fam = self.family.read().unwrap();
+        // Fuga intencionada a static para familias configuradas en tiempo de ejecución
+        Some(Box::leak(fam.clone().into_boxed_str()))
     }
 
     fn font_size(&self) -> Option<f32> {
@@ -66,6 +83,24 @@ impl Plugin for FontPlugin {
     fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
         Some(self)
     }
+
+    fn default_config(&self) -> Option<PluginConfig> {
+        let mut cfg = PluginConfig::new();
+        cfg.set("family", self.family.read().unwrap().clone());
+        Some(cfg)
+    }
+
+    fn load_config(&self, config: &PluginConfig) {
+        if let Some(family) = config.get("family") {
+            *self.family.write().unwrap() = family.to_string();
+        }
+    }
+
+    fn save_config(&self) -> Option<PluginConfig> {
+        let mut cfg = PluginConfig::new();
+        cfg.set("family", self.family.read().unwrap().clone());
+        Some(cfg)
+    }
 }
 
 #[cfg(test)]
@@ -92,5 +127,14 @@ mod tests {
             plugin.font_fallbacks(),
             Some(vec!["Symbols Nerd Font Mono".to_string()])
         );
+    }
+
+    #[test]
+    fn font_config_load_and_save() {
+        let plugin = FontPlugin::new("FiraCode Nerd Font Mono");
+        let mut cfg = PluginConfig::new();
+        cfg.set("family", "DejaVu Sans Mono");
+        plugin.load_config(&cfg);
+        assert_eq!(plugin.font_family(), Some("DejaVu Sans Mono"));
     }
 }
