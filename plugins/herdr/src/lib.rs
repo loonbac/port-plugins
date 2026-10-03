@@ -2,7 +2,7 @@
 //!
 //! Transforma PORT en el entorno visual y de flujo de trabajo de Herdr:
 //! - Inicio limpio: al abrir la terminal es 100 % terminal sin barras invasivas.
-//! - Con `Ctrl + Alt + T` se crea un nuevo Espacio (Space) y aparece la barra lateral izquierda.
+//! - Con `Ctrl + Alt + T` se crea un nuevo Espacio (Space) aparte del actual con su propio shell PTY y aparece la barra lateral izquierda.
 //! - Barra lateral y superior completamente transparentes, compartiendo la opacidad de la terminal.
 //! - Color de acento sincronizado en tiempo real con el wallpaper de NixOS (`~/.config/mpvpaper/accent.txt`).
 //! - Configurable y sincronizado a través de `~/.config/port/config.md`.
@@ -14,7 +14,7 @@ use gpui::{
     div, px, rgb, AnyElement, FontWeight, IntoElement, MouseButton, ParentElement, Styled, Window,
 };
 use port_plugin_api::{
-    AppearanceHook, ConfigFile, InputHook, KeyAction, LayoutHook, Plugin, PluginConfig,
+    AppearanceHook, ConfigFile, InputHook, KeyAction, LayoutHook, Plugin, PluginConfig, SpaceHook,
 };
 use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
@@ -82,6 +82,7 @@ pub struct HerdrState {
     pub tabs: Vec<HerdrTab>,
     pub opacity: f32,
     pub accent_mode: String,
+    pub new_space_requested: bool,
     next_tab_id: usize,
     next_space_num: usize,
 }
@@ -113,6 +114,7 @@ impl Default for HerdrState {
             }],
             opacity: 0.85,
             accent_mode: "auto".to_string(),
+            new_space_requested: false,
             next_tab_id: 2,
             next_space_num: 1,
         }
@@ -132,30 +134,25 @@ impl HerdrPlugin {
         }
     }
 
-    /// Crea un nuevo espacio y abre de inmediato la barra lateral izquierda.
+    /// Crea un nuevo espacio aparte del actual, solicita una nueva sesión PTY y abre el sidebar.
     pub fn create_space_and_open_sidebar(&self) {
         let mut s = self.state.write().unwrap();
-        let num = s.next_space_num;
-        s.next_space_num += 1;
-
-        let name = format!("space-{num}");
-        let branch = "main".to_string();
-
-        s.spaces.push(HerdrSpace {
-            name,
-            branch,
-            custom_color: None,
-        });
-
-        s.active_space_index = s.spaces.len() - 1;
-        s.sidebar_open = true;
-    }
-
-    /// Alterna la visibilidad de la barra lateral de espacios.
-    pub fn toggle_sidebar(&self) -> bool {
-        let mut s = self.state.write().unwrap();
         if s.spaces.is_empty() {
-            // Si no hay espacios creados aún, crear el primero y abrir
+            // El espacio que ya estaba abierto se convierte en space-1
+            s.spaces.push(HerdrSpace {
+                name: "space-1".to_string(),
+                branch: "main".to_string(),
+                custom_color: None,
+            });
+            // Y creamos el nuevo espacio aparte (space-2)
+            s.spaces.push(HerdrSpace {
+                name: "space-2".to_string(),
+                branch: "main".to_string(),
+                custom_color: None,
+            });
+            s.next_space_num = 3;
+            s.active_space_index = 1;
+        } else {
             let num = s.next_space_num;
             s.next_space_num += 1;
             s.spaces.push(HerdrSpace {
@@ -163,11 +160,23 @@ impl HerdrPlugin {
                 branch: "main".to_string(),
                 custom_color: None,
             });
-            s.sidebar_open = true;
+            s.active_space_index = s.spaces.len() - 1;
+        }
+        s.sidebar_open = true;
+        s.new_space_requested = true;
+    }
+
+    /// Alterna la visibilidad de la barra lateral de espacios.
+    pub fn toggle_sidebar(&self) -> bool {
+        let mut s = self.state.write().unwrap();
+        if s.spaces.is_empty() {
+            drop(s);
+            self.create_space_and_open_sidebar();
+            true
         } else {
             s.sidebar_open = !s.sidebar_open;
+            s.sidebar_open
         }
-        s.sidebar_open
     }
 
     /// Selecciona un espacio por índice.
@@ -237,6 +246,19 @@ impl AppearanceHook for HerdrPlugin {
 
     fn opacity(&self) -> Option<f32> {
         Some(self.state.read().unwrap().opacity)
+    }
+}
+
+impl SpaceHook for HerdrPlugin {
+    fn active_space(&self) -> usize {
+        self.state.read().unwrap().active_space_index
+    }
+
+    fn take_new_space_request(&self) -> bool {
+        let mut s = self.state.write().unwrap();
+        let req = s.new_space_requested;
+        s.new_space_requested = false;
+        req
     }
 }
 
@@ -346,7 +368,7 @@ impl LayoutHook for HerdrPlugin {
             spaces_list = spaces_list.child(item);
         }
 
-        // Sidebar con fondo 100% transparente compartiendo la opacidad de la terminal
+        // Sidebar con fondo 100% transparente compartiendo la opacidad de la terminal (sin hardcodeo de agents)
         let sidebar = div()
             .w(px(236.0))
             .h_full()
@@ -394,60 +416,11 @@ impl LayoutHook for HerdrPlugin {
             )
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(8.0))
-                    .pt(px(12.0))
-                    .border_t(px(1.0))
-                    .border_color(accent.opacity(0.25))
-                    .child(
-                        div()
-                            .px(px(6.0))
-                            .text_size(px(11.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x8b949e))
-                            .child("AGENTS"),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .justify_between()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .rounded(px(6.0))
-                            .bg(accent.opacity(0.12))
-                            .border_1()
-                            .border_color(accent.opacity(0.30))
-                            .child(
-                                div()
-                                    .flex()
-                                    .flex_row()
-                                    .items_center()
-                                    .gap(px(8.0))
-                                    .child(
-                                        div()
-                                            .w(px(6.0))
-                                            .h(px(6.0))
-                                            .rounded(px(3.0))
-                                            .bg(accent),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .font_weight(FontWeight::BOLD)
-                                            .text_color(rgb(0xf0f6fc))
-                                            .child("herdr"),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .text_color(accent)
-                                    .child("ready · idle"),
-                            ),
-                    ),
+                    .px(px(6.0))
+                    .py(px(6.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x6e7681))
+                    .child("Ctrl+Alt+T Nuevo espacio"),
             );
 
         Some(sidebar.into_any_element())
@@ -640,7 +613,7 @@ impl LayoutHook for HerdrPlugin {
 
 impl InputHook for HerdrPlugin {
     fn on_key(&self, key: &Key) -> KeyAction {
-        // Ctrl + Alt + T: crear un nuevo espacio y abrir de inmediato la barra lateral
+        // Ctrl + Alt + T: crear un nuevo espacio aparte del actual, solicitar nueva sesión PTY y abrir sidebar
         if key.ctrl && key.alt && !key.shift && key.key.to_lowercase() == "t" {
             self.create_space_and_open_sidebar();
             return KeyAction::Consume;
@@ -697,6 +670,10 @@ impl Plugin for HerdrPlugin {
     }
 
     fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
+        Some(self)
+    }
+
+    fn space_hook(&self) -> Option<&dyn SpaceHook> {
         Some(self)
     }
 
@@ -808,9 +785,13 @@ mod tests {
         assert_eq!(plugin.top_bar_height(), 38.0);
         assert!(plugin.top_bar().is_some());
 
-        // El primer espacio creado se llama space-1
-        assert_eq!(plugin.state.read().unwrap().spaces.len(), 1);
-        assert_eq!(plugin.state.read().unwrap().spaces[0].name, "space-1");
+        // Debe haber 2 espacios: space-1 (el previo) y space-2 (el nuevo)
+        let spaces = plugin.state.read().unwrap().spaces.clone();
+        assert_eq!(spaces.len(), 2);
+        assert_eq!(spaces[0].name, "space-1");
+        assert_eq!(spaces[1].name, "space-2");
+        assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
+        assert_eq!(plugin.take_new_space_request(), true);
     }
 
     #[test]
