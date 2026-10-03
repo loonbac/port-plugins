@@ -32,25 +32,41 @@ registry.register(FontPlugin::new("FiraCode Nerd Font Mono"));
 
 ### `font-zoom`
 
-Interactive zoom bound to the usual keys, recalculating cell geometry and
-resizing the PTY live.
+Owns font size as state, and nothing else: it reports the current size through
+`AppearanceHook` and exposes `zoom_in()`, `zoom_out()` and `reset_zoom()`.
 
-| Shortcut | Action |
-|---|---|
-| `Ctrl` `+` | Zoom in |
-| `Ctrl` `-` | Zoom out |
-| `Ctrl` `0` | Reset |
+It deliberately registers **no key bindings**. Wiring those actions to keys is
+the job of the `shortcuts` plugin, so the zoom can be bound to different keys, or
+to none at all, without touching this plugin.
 
 ### `shortcuts`
 
 Bind arbitrary key combinations to callbacks, with a compact `ctrl+shift+t`
-syntax.
+syntax. This is where every key binding in PORT lives, including the font zoom:
 
 ```rust
 use port_plugin_shortcuts::ShortcutsPlugin;
+
 let shortcuts = ShortcutsPlugin::new();
+
+// Its own binding.
 shortcuts.bind_str("ctrl+shift+k", || println!("Hello!"));
+
+// Driving another plugin's capability.
+let zoom = FontZoomPlugin::new(14.0);
+shortcuts.bind_str("ctrl+=", move || zoom.zoom_in());
+shortcuts.bind_str("ctrl+-", move || zoom.zoom_out());
+shortcuts.bind_str("ctrl+0", move || zoom.reset_zoom());
 ```
+
+The bindings used by the shipped configuration are:
+
+| Shortcut | Action |
+|---|---|
+| `Ctrl` `+` / `Ctrl` `=` | Zoom in |
+| `Ctrl` `+` `Shift` / `Ctrl` `=` `Shift` | Zoom in |
+| `Ctrl` `-` | Zoom out |
+| `Ctrl` `0` | Reset font size |
 
 ### `menu-customizer`
 

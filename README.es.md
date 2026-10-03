@@ -35,25 +35,41 @@ registry.register(FontPlugin::new("FiraCode Nerd Font Mono"));
 
 ### `font-zoom`
 
-Zoom interactivo con los atajos habituales, recalculando la geometría de celda y
-redimensionando el PTY en vivo.
+Es dueño del tamaño de fuente como estado, y nada más: informa del tamaño actual
+mediante `AppearanceHook` y expone `zoom_in()`, `zoom_out()` y `reset_zoom()`.
 
-| Atajo | Acción |
-|---|---|
-| `Ctrl` `+` | Aumentar |
-| `Ctrl` `-` | Reducir |
-| `Ctrl` `0` | Reiniciar |
+Deliberadamente **no registra ningún atajo**. Enlazar esas acciones a teclas es
+trabajo del plugin `shortcuts`, así el zoom se puede asociar a otras teclas, o
+dejarlo sin atajo, sin tocar este plugin.
 
 ### `shortcuts`
 
 Asocia combinaciones arbitrarias de teclas a callbacks, con una sintaxis compacta
-tipo `ctrl+shift+t`.
+tipo `ctrl+shift+t`. Aquí viven todos los atajos de PORT, incluido el zoom:
 
 ```rust
 use port_plugin_shortcuts::ShortcutsPlugin;
+
 let shortcuts = ShortcutsPlugin::new();
+
+// Su propio atajo.
 shortcuts.bind_str("ctrl+shift+k", || println!("¡Hola!"));
+
+// Manejando la capacidad de otro plugin.
+let zoom = FontZoomPlugin::new(14.0);
+shortcuts.bind_str("ctrl+=", move || zoom.zoom_in());
+shortcuts.bind_str("ctrl+-", move || zoom.zoom_out());
+shortcuts.bind_str("ctrl+0", move || zoom.reset_zoom());
 ```
+
+Los bindings que usa la configuración instalada son:
+
+| Atajo | Acción |
+|---|---|
+| `Ctrl` `+` / `Ctrl` `=` | Aumentar fuente |
+| `Ctrl` `+` `Shift` / `Ctrl` `=` `Shift` | Aumentar fuente |
+| `Ctrl` `-` | Reducir fuente |
+| `Ctrl` `0` | Reiniciar tamaño de fuente |
 
 ### `menu-customizer`
 

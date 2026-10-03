@@ -1,33 +1,39 @@
-//! Plugin de zoom y escalado interactivo de fuente para PORT.
+//! Plugin de zoom de fuente para PORT.
 //!
-//! Permite aumentar, reducir y restablecer dinámicamente el tamaño de la
-//! fuente mediante combinaciones estándar de teclado (`Ctrl++`, `Ctrl+-`, `Ctrl+0`),
-//! y sincronizar el tamaño por defecto con el archivo de configuración de PORT.
+//! Solo aporta la **capacidad**: cual es el tamano de fuente vigente, y como
+//! aumentarlo, reducirlo o restablecerlo. No captura ninguna tecla.
+//!
+//! Las combinaciones que disparan esas acciones son responsabilidad del plugin
+//! `shortcuts`, que registra los bindings que se quiera. Asi el zoom se puede
+//! enlazar a otras teclas, o dejarlo sin atajo, sin tocar este plugin.
 
 use std::path::Path;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
-use port_plugin_api::{AppearanceHook, ConfigFile, InputHook, KeyAction, Plugin, PluginConfig};
-use port_term_core::input::Key;
+use port_plugin_api::{AppearanceHook, ConfigFile, Plugin, PluginConfig};
 
 /// Plugin para zoom interactivo de tipografía.
+///
+/// Es clonable: la app registra una copia en el registro de plugins y conserva
+/// otra para enlazarla desde los atajos de `shortcuts`.
+#[derive(Clone)]
 pub struct FontZoomPlugin {
-    base_size: RwLock<f32>,
-    current_size: RwLock<f32>,
-    step: RwLock<f32>,
-    min_size: RwLock<f32>,
-    max_size: RwLock<f32>,
+    base_size: Arc<RwLock<f32>>,
+    current_size: Arc<RwLock<f32>>,
+    step: Arc<RwLock<f32>>,
+    min_size: Arc<RwLock<f32>>,
+    max_size: Arc<RwLock<f32>>,
 }
 
 impl FontZoomPlugin {
     /// Crea una nueva instancia con el tamaño base deseado (ej. 14.0 pt).
     pub fn new(base_size: f32) -> Self {
         Self {
-            base_size: RwLock::new(base_size),
-            current_size: RwLock::new(base_size),
-            step: RwLock::new(1.0),
-            min_size: RwLock::new(6.0),
-            max_size: RwLock::new(72.0),
+            base_size: Arc::new(RwLock::new(base_size)),
+            current_size: Arc::new(RwLock::new(base_size)),
+            step: Arc::new(RwLock::new(1.0)),
+            min_size: Arc::new(RwLock::new(6.0)),
+            max_size: Arc::new(RwLock::new(72.0)),
         }
     }
 
@@ -109,39 +115,6 @@ impl AppearanceHook for FontZoomPlugin {
     }
 }
 
-impl InputHook for FontZoomPlugin {
-    fn on_key(&self, key: &Key) -> KeyAction {
-        if !key.ctrl {
-            return KeyAction::Pass;
-        }
-
-        // Ctrl + '+' o '=' (teclado numérico o fila de números)
-        let is_plus = key.key == "+"
-            || key.key == "="
-            || key.text.as_deref() == Some("+")
-            || key.text.as_deref() == Some("=");
-
-        // Ctrl + '-' (menos o guion)
-        let is_minus = key.key == "-" || key.text.as_deref() == Some("-");
-
-        // Ctrl + '0' (restablecer)
-        let is_zero = key.key == "0" || key.text.as_deref() == Some("0");
-
-        if is_plus {
-            self.zoom_in();
-            KeyAction::Consume
-        } else if is_minus {
-            self.zoom_out();
-            KeyAction::Consume
-        } else if is_zero {
-            self.reset_zoom();
-            KeyAction::Consume
-        } else {
-            KeyAction::Pass
-        }
-    }
-}
-
 impl Plugin for FontZoomPlugin {
     fn id(&self) -> &'static str {
         "font-zoom"
@@ -156,10 +129,6 @@ impl Plugin for FontZoomPlugin {
     }
 
     fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
-        Some(self)
-    }
-
-    fn input_hook(&self) -> Option<&dyn InputHook> {
         Some(self)
     }
 
@@ -230,32 +199,19 @@ mod tests {
     }
 
     #[test]
-    fn input_hook_consumes_zoom_keystrokes() {
+    fn zoom_operations_are_pure_state_changes() {
+        // El plugin solo cambia su propio estado; la captura de teclas es
+        // trabajo del plugin de atajos, asi que aqui no debe haber ningun hook
+        // de entrada registrado.
         let plugin = FontZoomPlugin::new(14.0);
+        assert!(
+            plugin.input_hook().is_none(),
+            "font-zoom no debe capturar teclas: eso es del plugin shortcuts"
+        );
 
-        // Ctrl + '+'
-        let ctrl_plus = Key::new("+").ctrl();
-        assert_eq!(plugin.on_key(&ctrl_plus), KeyAction::Consume);
+        plugin.zoom_in();
         assert_eq!(plugin.size(), 15.0);
-
-        // Ctrl + '='
-        let ctrl_equal = Key::new("=").ctrl();
-        assert_eq!(plugin.on_key(&ctrl_equal), KeyAction::Consume);
-        assert_eq!(plugin.size(), 16.0);
-
-        // Ctrl + '-'
-        let ctrl_minus = Key::new("-").ctrl();
-        assert_eq!(plugin.on_key(&ctrl_minus), KeyAction::Consume);
-        assert_eq!(plugin.size(), 15.0);
-
-        // Ctrl + '0'
-        let ctrl_zero = Key::new("0").ctrl();
-        assert_eq!(plugin.on_key(&ctrl_zero), KeyAction::Consume);
-        assert_eq!(plugin.size(), 14.0);
-
-        // Regular key (pass)
-        let regular_a = Key::new("a").ctrl();
-        assert_eq!(plugin.on_key(&regular_a), KeyAction::Pass);
+        plugin.zoom_out();
         assert_eq!(plugin.size(), 14.0);
     }
 
