@@ -9,6 +9,7 @@
 //! - Color de acento sincronizado en tiempo real con el wallpaper de NixOS (`~/.config/mpvpaper/accent.txt`).
 //! - Configurable y sincronizado a través de `~/.config/port/config.md`.
 
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use gpui::prelude::*;
@@ -20,6 +21,7 @@ use port_plugin_api::{
 };
 use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
+use port_term_core::pty::RunningApp;
 
 /// Obtiene el color de acento del wallpaper activo en NixOS (`~/.config/mpvpaper/accent.txt`).
 pub fn system_accent_color() -> Rgb {
@@ -59,6 +61,86 @@ pub struct HerdrTab {
     pub id: usize,
     pub title: String,
     pub session_id: usize,
+    /// Programa que se está ejecutando en primer plano en esta pestaña.
+    pub app: Option<RunningApp>,
+}
+
+/// Iconos Nerd Font (Symbols Nerd Font Mono) para los programas reconocidos.
+const ICON_PI: char = '\u{f03ff}'; // md-pi
+const ICON_GEMINI: char = '\u{f0a81}'; // md-zodiac_gemini
+const ICON_ROBOT: char = '\u{f06a9}'; // md-robot
+const ICON_CHIP: char = '\u{f061a}'; // md-chip
+const ICON_HEXAGON: char = '\u{f02d8}'; // md-hexagon
+const ICON_CPU: char = '\u{f0ee0}'; // md-cpu_64_bit
+const ICON_MEMORY: char = '\u{f035b}'; // md-memory
+const ICON_CONSOLE: char = '\u{f018d}'; // md-console
+const ICON_CURSOR: char = '\u{f01bf}'; // md-cursor_default_outline
+
+/// Traduce el binario de un programa al icono y nombre legible que muestra la pestaña.
+fn app_identity(app: &RunningApp) -> (char, String) {
+    let bin = app.bin.as_str();
+
+    // Agentes de IA
+    if bin == "pi" || bin.starts_with("pi-") || bin.starts_with("pi_") {
+        return (ICON_PI, "Pi Agent".to_string());
+    }
+    if bin.contains("codex") {
+        return (ICON_CHIP, "Codex".to_string());
+    }
+    if bin.contains("claude") {
+        return (ICON_ROBOT, "Claude Code".to_string());
+    }
+    if bin.contains("antigravity") {
+        return (ICON_HEXAGON, "Antigravity".to_string());
+    }
+    if bin.contains("opencode") {
+        return (ICON_CPU, "OpenCode".to_string());
+    }
+    if bin.contains("gemini") {
+        return (ICON_GEMINI, "Gemini CLI".to_string());
+    }
+    if bin.contains("aider") {
+        return (ICON_MEMORY, "Aider".to_string());
+    }
+    if bin.contains("cursor") {
+        return (ICON_CURSOR, "Cursor Agent".to_string());
+    }
+
+    // Utilidades de terminal conocidas
+    match bin {
+        "btop" | "htop" | "top" | "bpytop" => {
+            return (ICON_CPU, "System Monitor".to_string());
+        }
+        "nvim" | "vim" | "vi" | "nvim-qt" => {
+            return (ICON_MEMORY, "Editor".to_string());
+        }
+        "less" | "more" | "man" => {
+            return (ICON_CONSOLE, "Pager".to_string());
+        }
+        "python" | "python3" | "node" | "deno" | "bun" => {
+            return (ICON_CHIP, "Runtime".to_string());
+        }
+        _ => {}
+    }
+
+    // Cualquier otro agente o programa desconocido: robot + nombre capitalizado.
+    (
+        ICON_ROBOT,
+        humanize(bin),
+    )
+}
+
+/// Convierte `opencode` en `Opencode` para mostrarlo como nombre legible.
+fn humanize(bin: &str) -> String {
+    let mut chars = bin.chars();
+    match chars.next() {
+        Some(first) => {
+            let mut out: String = first.to_uppercase().collect();
+            out.push_str(chars.as_str());
+            out
+        }
+        None => bin.to_string(),
+    }
 }
 
 /// Definición de un espacio de trabajo en Herdr.
@@ -110,6 +192,7 @@ impl Default for HerdrState {
                     id: 1,
                     title: "terminal".to_string(),
                     session_id: 0,
+                    app: None,
                 }],
                 active_tab_index: 0,
             }],
@@ -153,6 +236,7 @@ impl HerdrPlugin {
                 id: next_tab,
                 title: "terminal".to_string(),
                 session_id: 0, // Se actualizará en on_session_created
+                app: None,
             }],
             active_tab_index: 0,
         });
@@ -173,6 +257,7 @@ impl HerdrPlugin {
                 id: tab_id,
                 title: format!("term {}", space.tabs.len() + 1),
                 session_id: 0, // Se actualizará en on_session_created
+                app: None,
             });
             space.active_tab_index = space.tabs.len() - 1;
             s.new_session_requested = true;
@@ -309,10 +394,67 @@ impl SpaceHook for HerdrPlugin {
         }
     }
 
+    fn update_session_app(&self, session_id: usize, app: Option<&RunningApp>) {
+        let mut s = self.state.write().unwrap();
+        for space in s.spaces.iter_mut() {
+            for tab in space.tabs.iter_mut() {
+                if tab.session_id == session_id {
+                    tab.app = app.cloned();
+                }
+            }
+        }
+    }
+
     fn take_close_session_request(&self) -> Option<usize> {
         let mut s = self.state.write().unwrap();
         s.close_session_requested.take()
     }
+
+    fn update_session_cwd(&self, session_id: usize, cwd: &Path, folder_name: &str) {
+        let mut s = self.state.write().unwrap();
+        for space in s.spaces.iter_mut() {
+            let contains_session = space.tabs.iter().any(|t| t.session_id == session_id);
+            if contains_session {
+                // Actualiza el nombre del espacio con la carpeta actual
+                if !folder_name.is_empty() {
+                    space.name = folder_name.to_string();
+                }
+                // Si la pestaña tiene nombre por defecto, se actualiza también con la carpeta
+                for tab in space.tabs.iter_mut() {
+                    if tab.session_id == session_id && (tab.title == "terminal" || tab.title.starts_with("term ")) {
+                        tab.title = folder_name.to_string();
+                    }
+                }                // Detecta automáticamente la rama git si la carpeta está en un repositorio
+                if let Some(branch) = detect_git_branch(cwd) {
+                    space.branch = branch;
+                } else {
+                    space.branch = "local".to_string();
+                }
+                break;
+            }
+        }
+    }
+}
+
+/// Detecta la rama activa de git leyendo directamente `.git/HEAD` sin invocar subprocesos.
+fn detect_git_branch(cwd: &Path) -> Option<String> {
+    let mut current = Some(cwd);
+    while let Some(dir) = current {
+        let git_head = dir.join(".git").join("HEAD");
+        if git_head.exists() {
+            if let Ok(content) = std::fs::read_to_string(&git_head) {
+                let trimmed = content.trim();
+                if let Some(branch) = trimmed.strip_prefix("ref: refs/heads/") {
+                    return Some(branch.to_string());
+                } else if trimmed.len() >= 7 {
+                    return Some(trimmed[..7].to_string());
+                }
+            }
+            break;
+        }
+        current = dir.parent();
+    }
+    None
 }
 
 impl LayoutHook for HerdrPlugin {
@@ -549,8 +691,39 @@ impl LayoutHook for HerdrPlugin {
                         })
                         .child(">"),
                 )
-                .child(
-                    div()
+                .child(match tab.app.as_ref() {
+                    // Hay un programa en primer plano: icono Nerd Font + nombre legible
+                    Some(app) => {
+                        let (icon, label) = app_identity(app);
+                        div()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(accent)
+                                    .child(icon.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .font_weight(if is_active {
+                                        FontWeight::BOLD
+                                    } else {
+                                        FontWeight::NORMAL
+                                    })
+                                    .text_color(if is_active {
+                                        rgb(0xf0f6fc)
+                                    } else {
+                                        rgb(0x8b949e)
+                                    })
+                                    .child(label),
+                            )
+                    }
+                    // Terminal en reposo: se muestra la carpeta de la sesión
+                    None => div()
                         .text_size(px(12.0))
                         .font_weight(if is_active {
                             FontWeight::BOLD
@@ -563,7 +736,7 @@ impl LayoutHook for HerdrPlugin {
                             rgb(0x8b949e)
                         })
                         .child(tab.title.clone()),
-                )
+                })
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -613,6 +786,7 @@ impl LayoutHook for HerdrPlugin {
                         id: next_id,
                         title: format!("term {}", sp.tabs.len() + 1),
                         session_id: 0,
+                        app: None,
                     });
                     sp.active_tab_index = sp.tabs.len() - 1;
                     s.new_session_requested = true;
@@ -751,6 +925,7 @@ impl Plugin for HerdrPlugin {
                                 id: idx + 1,
                                 title: "terminal".to_string(),
                                 session_id: idx,
+                                app: None,
                             }],
                             active_tab_index: 0,
                         });
@@ -871,5 +1046,58 @@ mod tests {
         let plugin = HerdrPlugin::default();
         let accent = plugin.state.read().unwrap().effective_accent();
         assert_eq!(accent, system_accent_color());
+    }
+
+    #[test]
+    fn herdr_space_updates_name_and_branch_from_cwd() {
+        let plugin = HerdrPlugin::default();
+        let path = std::path::Path::new("/home/loonbac/Proyectos/port");
+        plugin.update_session_cwd(0, path, "port");
+
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].name, "port");
+        assert_eq!(s.spaces[0].branch, "master");
+    }
+
+    #[test]
+    fn ai_agents_get_their_nerd_font_icon_and_readable_name() {
+        let cases = [
+            ("pi", ICON_PI, "Pi Agent"),
+            ("codex", ICON_CHIP, "Codex"),
+            ("claude", ICON_ROBOT, "Claude Code"),
+            ("antigravity", ICON_HEXAGON, "Antigravity"),
+            ("opencode", ICON_CPU, "OpenCode"),
+            ("gemini", ICON_GEMINI, "Gemini CLI"),
+        ];
+        for (bin, icon, label) in cases {
+            let app = RunningApp { pid: 1, bin: bin.to_string() };
+            let (got_icon, got_label) = app_identity(&app);
+            assert_eq!(got_icon, icon, "icono incorrecto para {bin}");
+            assert_eq!(got_label, label, "nombre incorrecto para {bin}");
+        }
+    }
+
+    #[test]
+    fn unknown_agents_fall_back_to_robot_and_humanized_name() {
+        let app = RunningApp { pid: 1, bin: "miagente".to_string() };
+        let (icon, label) = app_identity(&app);
+        assert_eq!(icon, ICON_ROBOT);
+        assert_eq!(label, "Miagente");
+    }
+
+    #[test]
+    fn running_app_updates_the_matching_tab() {
+        let plugin = HerdrPlugin::default();
+        // Se crean dos pestañas en el espacio 1
+        let ctrl_shift_t = Key::new("t").ctrl().shift();
+        plugin.on_key(&ctrl_shift_t);
+        plugin.on_session_created(1);
+
+        let app = RunningApp { pid: 42, bin: "pi".to_string() };
+        plugin.update_session_app(1, Some(&app));
+
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs[1].app, Some(app));
+        assert_eq!(s.spaces[0].tabs[0].app, None);
     }
 }
