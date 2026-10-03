@@ -19,8 +19,8 @@ license = "MIT"
 gpui = "=0.2.2"
 # Fijado al tag: sin esto, una build toma el último master, que puede no
 # coincidir con la API y romper la compilación sin aviso.
-port-term-core = { git = "https://github.com/loonbac/port.git", tag = "v0.1.0" }
-port-plugin-api = { git = "https://github.com/loonbac/port.git", tag = "v0.1.0" }
+port-term-core = { git = "https://github.com/loonbac/port.git", tag = "v0.1.1" }
+port-plugin-api = { git = "https://github.com/loonbac/port.git", tag = "v0.1.1" }
 
 [patch."https://github.com/loonbac/port.git"]
 port-term-core = { path = "../port/crates/term-core" }
