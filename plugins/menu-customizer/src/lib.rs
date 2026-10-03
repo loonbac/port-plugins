@@ -76,10 +76,10 @@ impl PluginManagerHook for MenuCustomizerPlugin {
         let mut list = div().flex().flex_col().gap_1();
         for (i, p) in plugins.iter().enumerate() {
             let is_selected = i == selected_index;
-            let (status_badge, status_color) = if p.enabled {
-                ("⚡ ON", rgb(0x2ea043))
+            let (status_badge, dot_color, badge_bg, badge_border) = if p.enabled {
+                ("ON", rgb(0x3fb950), rgb(0x18241b), rgb(0x238636))
             } else {
-                ("✕ OFF", rgb(0xda3633))
+                ("OFF", rgb(0x8b949e), rgb(0x1a1824), rgb(0x3d3852))
             };
 
             let row_bg = if is_selected {
@@ -99,8 +99,9 @@ impl PluginManagerHook for MenuCustomizerPlugin {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .p_2()
-                .rounded_md()
+                .px(px(10.0))
+                .py(px(8.0))
+                .rounded(px(6.0))
                 .bg(row_bg)
                 .border_1()
                 .border_color(row_border)
@@ -109,13 +110,33 @@ impl PluginManagerHook for MenuCustomizerPlugin {
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap_2()
+                        .gap(px(10.0))
                         .child(
                             div()
-                                .text_size(px(12.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(status_color)
-                                .child(status_badge),
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .gap(px(6.0))
+                                .px(px(8.0))
+                                .py(px(2.0))
+                                .rounded(px(4.0))
+                                .bg(badge_bg)
+                                .border_1()
+                                .border_color(badge_border)
+                                .child(
+                                    div()
+                                        .w(px(6.0))
+                                        .h(px(6.0))
+                                        .rounded(px(3.0))
+                                        .bg(dot_color),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(dot_color)
+                                        .child(status_badge),
+                                ),
                         )
                         .child(
                             div()
@@ -126,14 +147,18 @@ impl PluginManagerHook for MenuCustomizerPlugin {
                         )
                         .child(
                             div()
-                                .text_size(px(12.0))
+                                .text_size(px(11.0))
                                 .text_color(rgb(0x8b949e))
                                 .child(format!("({})", p.id)),
                         ),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .px(px(6.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x2d2640))
+                        .text_size(px(11.0))
                         .text_color(rgb(0xa371f7))
                         .child(format!("v{}", p.version)),
                 );
@@ -143,14 +168,14 @@ impl PluginManagerHook for MenuCustomizerPlugin {
 
         let modal = div()
             .w(px(modal_w))
-            .p_4()
-            .rounded_lg()
+            .p(px(16.0))
+            .rounded(px(8.0))
             .bg(rgb(0x0e0d14))
             .border_1()
             .border_color(rgb(0x8957e5))
             .flex()
             .flex_col()
-            .gap_3()
+            .gap(px(12.0))
             .child(
                 div()
                     .flex()
@@ -159,24 +184,50 @@ impl PluginManagerHook for MenuCustomizerPlugin {
                     .justify_between()
                     .child(
                         div()
-                            .text_size(px(15.0))
-                            .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xd2a8ff))
-                            .child(format!("✨ {}", title)),
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(8.0))
+                            .child(
+                                div()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(0x2d1f47))
+                                    .border_1()
+                                    .border_color(rgb(0x8957e5))
+                                    .text_size(px(10.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xd2a8ff))
+                                    .child("EXTENSIONS"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(14.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xf0f6fc))
+                                    .child(title),
+                            ),
                     )
                     .child(
                         div()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(0x1e192c))
+                            .border_1()
+                            .border_color(rgb(0x3d3559))
                             .text_size(px(11.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0xa371f7))
-                            .child("CUSTOM PATCHED"),
+                            .child("CUSTOM PATCH"),
                     ),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(px(11.0))
                     .text_color(rgb(0x8b949e))
-                    .child("[↑/↓] Navegar   [Espacio/Enter] Alternar   [Esc] Cerrar"),
+                    .child("↑↓ Navegar   Espacio / Enter Alternar   Esc Cerrar"),
             )
             .child(list);
 
