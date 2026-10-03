@@ -186,6 +186,22 @@ pub struct HerdrState {
     next_space_num: usize,
 }
 
+/// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
+fn default_space() -> HerdrSpace {
+    HerdrSpace {
+        name: "space-1".to_string(),
+        branch: "main".to_string(),
+        custom_color: None,
+        tabs: vec![HerdrTab {
+            id: 1,
+            title: "terminal".to_string(),
+            session_id: 0,
+            app: None,
+        }],
+        active_tab_index: 0,
+    }
+}
+
 impl HerdrState {
     /// Resuelve el color de acento actual (leyendo el wallpaper si está en modo "auto").
     pub fn effective_accent(&self) -> Rgb {
@@ -473,6 +489,28 @@ impl SpaceHook for HerdrPlugin {
     fn take_close_session_request(&self) -> Option<usize> {
         let mut s = self.state.write().unwrap();
         s.close_session_requested.take()
+    }
+
+    fn on_session_closed(&self, session_id: usize) {
+        let mut s = self.state.write().unwrap();
+
+        // Quita la pestaña que pertenecía a esa sesión.
+        for space in s.spaces.iter_mut() {
+            space.tabs.retain(|t| t.session_id != session_id);
+        }
+
+        // Un espacio sin pestañas deja de existir: si la terminal entero se
+        // cierra, no debe quedar un espacio fantasma en la barra lateral.
+        s.spaces.retain(|space| !space.tabs.is_empty());
+
+        if s.spaces.is_empty() {
+            // La ventana está a punto de cerrarse, pero dejamos el estado
+            // coherente por si alguien vuelve a mirar el registro.
+            s.spaces.push(default_space());
+            s.active_space_index = 0;
+        } else if s.active_space_index >= s.spaces.len() {
+            s.active_space_index = s.spaces.len() - 1;
+        }
     }
 
     fn update_session_cwd(&self, session_id: usize, cwd: &Path, folder_name: &str) {
@@ -1323,6 +1361,39 @@ mod tests {
         assert_eq!(plugin.sidebar_width(), SIDEBAR_MIN_WIDTH);
         assert!(plugin.update_resize(0.0));
         assert_eq!(plugin.sidebar_width(), SIDEBAR_MIN_WIDTH);
+    }
+
+    #[test]
+    fn closing_a_tab_removes_it_and_deletes_the_space_when_empty() {
+        let plugin = HerdrPlugin::default();
+        assert_eq!(plugin.state.read().unwrap().spaces.len(), 1);
+
+        // Se abre una segunda pestaña con su propia sesión.
+        let ctrl_shift_t = Key::new("t").ctrl().shift();
+        plugin.on_key(&ctrl_shift_t);
+        plugin.on_session_created(1);
+        assert_eq!(
+            plugin.state.read().unwrap().spaces[0].tabs.len(),
+            2,
+            "deben existir dos pestañas en el espacio"
+        );
+
+        // Se cierra la segunda pestaña: el espacio conserva su otra pestaña.
+        plugin.on_session_closed(1);
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces.len(), 1, "el espacio sigue vivo con una pestaña");
+        assert_eq!(s.spaces[0].tabs.len(), 1);
+
+        // Se cierra la última: el espacio deja de existir y se vuelve al inicial.
+        drop(s);
+        plugin.on_session_closed(0);
+        let s = plugin.state.read().unwrap();
+        assert_eq!(
+            s.spaces[0].tabs.len(),
+            1,
+            "un espacio sin pestañas no debe quedar en la barra lateral"
+        );
+        assert_eq!(s.active_space_index, 0);
     }
 
     #[test]

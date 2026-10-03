@@ -165,7 +165,7 @@ fn main() {
 
 ```bash
 nix-shell      # native libraries linked
-cargo test     # 39 unit tests
+cargo test     # 40 unit tests
 cargo build --release
 ```
 

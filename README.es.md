@@ -170,7 +170,7 @@ fn main() {
 
 ```bash
 nix-shell      # librerías nativas enlazadas
-cargo test     # 39 tests unitarios
+cargo test     # 40 tests unitarios
 cargo build --release
 ```
 
