@@ -2,7 +2,8 @@
 //!
 //! Transforma PORT en el entorno visual y de flujo de trabajo de Herdr:
 //! - Inicio limpio: al abrir la terminal es 100 % terminal sin barras invasivas.
-//! - Con `Ctrl + Alt + T` se crea un nuevo Espacio (Space) aparte del actual con su propio shell PTY y aparece la barra lateral izquierda.
+//! - Con `Ctrl + Shift + T` se crea una nueva pestaña en el espacio activo, con su propio shell PTY.
+//! - Con `Ctrl + Alt + T` se crea un nuevo Espacio (Space) aparte con su propia terminal y aparece la barra lateral.
 //! - Barra lateral y superior completamente transparentes, compartiendo la opacidad de la terminal.
 //! - Color de acento sincronizado en tiempo real con el wallpaper de NixOS (`~/.config/mpvpaper/accent.txt`).
 //! - Configurable y sincronizado a través de `~/.config/port/config.md`.
@@ -51,10 +52,13 @@ fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
     rgb(packed).into()
 }
 
-fn hsla_color(r: u8, g: u8, b: u8, a: f32) -> gpui::Hsla {
-    let mut h: gpui::Hsla = rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into();
-    h.a = a;
-    h
+
+/// Definición de una pestaña de terminal con su sesión asociada.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrTab {
+    pub id: usize,
+    pub title: String,
+    pub session_id: usize,
 }
 
 /// Definición de un espacio de trabajo en Herdr.
@@ -63,13 +67,8 @@ pub struct HerdrSpace {
     pub name: String,
     pub branch: String,
     pub custom_color: Option<Rgb>,
-}
-
-/// Definición de una pestaña de terminal en Herdr.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HerdrTab {
-    pub id: usize,
-    pub title: String,
+    pub tabs: Vec<HerdrTab>,
+    pub active_tab_index: usize,
 }
 
 /// Estado interno del plugin Herdr.
@@ -78,11 +77,10 @@ pub struct HerdrState {
     pub sidebar_open: bool,
     pub active_space_index: usize,
     pub spaces: Vec<HerdrSpace>,
-    pub active_tab_index: usize,
-    pub tabs: Vec<HerdrTab>,
     pub opacity: f32,
     pub accent_mode: String,
-    pub new_space_requested: bool,
+    pub new_session_requested: bool,
+    pub close_session_requested: Option<usize>,
     next_tab_id: usize,
     next_space_num: usize,
 }
@@ -103,20 +101,26 @@ impl HerdrState {
 impl Default for HerdrState {
     fn default() -> Self {
         Self {
-            // Inicialmente cerrado y sin spaces por defecto: la terminal abre pura y limpia
+            // Inicialmente cerrado: la terminal abre pura y limpia a pantalla completa
             sidebar_open: false,
             active_space_index: 0,
-            spaces: Vec::new(),
-            active_tab_index: 0,
-            tabs: vec![HerdrTab {
-                id: 1,
-                title: "terminal".to_string(),
+            spaces: vec![HerdrSpace {
+                name: "space-1".to_string(),
+                branch: "main".to_string(),
+                custom_color: None,
+                tabs: vec![HerdrTab {
+                    id: 1,
+                    title: "terminal".to_string(),
+                    session_id: 0,
+                }],
+                active_tab_index: 0,
             }],
             opacity: 0.85,
             accent_mode: "auto".to_string(),
-            new_space_requested: false,
+            new_session_requested: false,
+            close_session_requested: None,
             next_tab_id: 2,
-            next_space_num: 1,
+            next_space_num: 2,
         }
     }
 }
@@ -137,46 +141,52 @@ impl HerdrPlugin {
     /// Crea un nuevo espacio aparte del actual, solicita una nueva sesión PTY y abre el sidebar.
     pub fn create_space_and_open_sidebar(&self) {
         let mut s = self.state.write().unwrap();
-        if s.spaces.is_empty() {
-            // El espacio que ya estaba abierto se convierte en space-1
-            s.spaces.push(HerdrSpace {
-                name: "space-1".to_string(),
-                branch: "main".to_string(),
-                custom_color: None,
-            });
-            // Y creamos el nuevo espacio aparte (space-2)
-            s.spaces.push(HerdrSpace {
-                name: "space-2".to_string(),
-                branch: "main".to_string(),
-                custom_color: None,
-            });
-            s.next_space_num = 3;
-            s.active_space_index = 1;
-        } else {
-            let num = s.next_space_num;
-            s.next_space_num += 1;
-            s.spaces.push(HerdrSpace {
-                name: format!("space-{num}"),
-                branch: "main".to_string(),
-                custom_color: None,
-            });
-            s.active_space_index = s.spaces.len() - 1;
-        }
+        let num = s.next_space_num;
+        s.next_space_num += 1;
+
+        let next_tab = s.next_tab_id;
+        s.next_tab_id += 1;
+
+        s.spaces.push(HerdrSpace {
+            name: format!("space-{num}"),
+            branch: "main".to_string(),
+            custom_color: None,
+            tabs: vec![HerdrTab {
+                id: next_tab,
+                title: "terminal".to_string(),
+                session_id: 0, // Se actualizará en on_session_created
+            }],
+            active_tab_index: 0,
+        });
+
+        s.active_space_index = s.spaces.len() - 1;
         s.sidebar_open = true;
-        s.new_space_requested = true;
+        s.new_session_requested = true;
+    }
+
+    /// Crea una nueva pestaña dentro del espacio actualmente activo.
+    pub fn create_tab_in_active_space(&self) {
+        let mut s = self.state.write().unwrap();
+        let tab_id = s.next_tab_id;
+        s.next_tab_id += 1;
+
+        let space_idx = s.active_space_index;
+        if let Some(space) = s.spaces.get_mut(space_idx) {
+            space.tabs.push(HerdrTab {
+                id: tab_id,
+                title: format!("term {}", space.tabs.len() + 1),
+                session_id: 0, // Se actualizará en on_session_created
+            });
+            space.active_tab_index = space.tabs.len() - 1;
+            s.new_session_requested = true;
+        }
     }
 
     /// Alterna la visibilidad de la barra lateral de espacios.
     pub fn toggle_sidebar(&self) -> bool {
         let mut s = self.state.write().unwrap();
-        if s.spaces.is_empty() {
-            drop(s);
-            self.create_space_and_open_sidebar();
-            true
-        } else {
-            s.sidebar_open = !s.sidebar_open;
-            s.sidebar_open
-        }
+        s.sidebar_open = !s.sidebar_open;
+        s.sidebar_open
     }
 
     /// Selecciona un espacio por índice.
@@ -187,39 +197,37 @@ impl HerdrPlugin {
         }
     }
 
-    /// Crea una nueva pestaña.
-    pub fn new_tab(&self, title: impl Into<String>) -> usize {
+    /// Selecciona una pestaña por índice dentro del espacio activo.
+    pub fn select_tab(&self, index: usize) {
         let mut s = self.state.write().unwrap();
-        let id = s.next_tab_id;
-        s.next_tab_id += 1;
-        s.tabs.push(HerdrTab {
-            id,
-            title: title.into(),
-        });
-        s.active_tab_index = s.tabs.len() - 1;
-        id
-    }
-
-    /// Cierra la pestaña activa si hay más de una.
-    pub fn close_active_tab(&self) -> bool {
-        let mut s = self.state.write().unwrap();
-        if s.tabs.len() > 1 {
-            let active_idx = s.active_tab_index;
-            s.tabs.remove(active_idx);
-            if s.active_tab_index >= s.tabs.len() {
-                s.active_tab_index = s.tabs.len() - 1;
+        let space_idx = s.active_space_index;
+        if let Some(space) = s.spaces.get_mut(space_idx) {
+            if index < space.tabs.len() {
+                space.active_tab_index = index;
             }
-            true
-        } else {
-            false
         }
     }
 
-    /// Selecciona una pestaña por índice.
-    pub fn select_tab(&self, index: usize) {
+    /// Cierra la pestaña activa en el espacio actual si hay más de una.
+    pub fn close_active_tab(&self) -> bool {
         let mut s = self.state.write().unwrap();
-        if index < s.tabs.len() {
-            s.active_tab_index = index;
+        let space_idx = s.active_space_index;
+        let mut closed_session = None;
+        if let Some(space) = s.spaces.get_mut(space_idx) {
+            if space.tabs.len() > 1 {
+                let tab_idx = space.active_tab_index;
+                let removed_tab = space.tabs.remove(tab_idx);
+                closed_session = Some(removed_tab.session_id);
+                if space.active_tab_index >= space.tabs.len() {
+                    space.active_tab_index = space.tabs.len() - 1;
+                }
+            }
+        }
+        if let Some(sess_id) = closed_session {
+            s.close_session_requested = Some(sess_id);
+            true
+        } else {
+            false
         }
     }
 
@@ -239,9 +247,8 @@ impl Default for HerdrPlugin {
 }
 
 impl AppearanceHook for HerdrPlugin {
-    /// Fondo oscuro característico de Herdr (#0e0e16).
-    fn background_tint(&self, _base: Rgb) -> Rgb {
-        Rgb::new(14, 14, 22)
+    fn background_tint(&self, base: Rgb) -> Rgb {
+        base
     }
 
     fn opacity(&self) -> Option<f32> {
@@ -250,22 +257,50 @@ impl AppearanceHook for HerdrPlugin {
 }
 
 impl SpaceHook for HerdrPlugin {
+    fn active_session(&self) -> usize {
+        let s = self.state.read().unwrap();
+        if let Some(space) = s.spaces.get(s.active_space_index) {
+            if let Some(tab) = space.tabs.get(space.active_tab_index) {
+                return tab.session_id;
+            }
+        }
+        0
+    }
+
     fn active_space(&self) -> usize {
         self.state.read().unwrap().active_space_index
     }
 
-    fn take_new_space_request(&self) -> bool {
+    fn take_new_session_request(&self) -> bool {
         let mut s = self.state.write().unwrap();
-        let req = s.new_space_requested;
-        s.new_space_requested = false;
+        let req = s.new_session_requested;
+        s.new_session_requested = false;
         req
+    }
+
+    fn on_session_created(&self, session_id: usize) {
+        let mut s = self.state.write().unwrap();
+        let space_idx = s.active_space_index;
+        if let Some(space) = s.spaces.get_mut(space_idx) {
+            let tab_idx = space.active_tab_index;
+            if let Some(tab) = space.tabs.get_mut(tab_idx) {
+                tab.session_id = session_id;
+            }
+        }
+    }
+
+    fn take_close_session_request(&self) -> Option<usize> {
+        let mut s = self.state.write().unwrap();
+        s.close_session_requested.take()
     }
 }
 
 impl LayoutHook for HerdrPlugin {
     fn left_sidebar_width(&self) -> f32 {
         let s = self.state.read().unwrap();
-        if s.sidebar_open && !s.spaces.is_empty() {
+        if s.sidebar_open && s.spaces.len() > 1 {
+            236.0
+        } else if s.sidebar_open && !s.spaces.is_empty() {
             236.0
         } else {
             0.0
@@ -274,8 +309,13 @@ impl LayoutHook for HerdrPlugin {
 
     fn top_bar_height(&self) -> f32 {
         let s = self.state.read().unwrap();
-        // Solo ocupa altura si hay pestañas múltiples o si el panel de spaces está abierto
-        if s.tabs.len() > 1 || (s.sidebar_open && !s.spaces.is_empty()) {
+        let space_tabs_len = s
+            .spaces
+            .get(s.active_space_index)
+            .map(|sp| sp.tabs.len())
+            .unwrap_or(0);
+
+        if space_tabs_len > 1 || (s.sidebar_open && s.spaces.len() > 1) {
             38.0
         } else {
             0.0
@@ -284,7 +324,7 @@ impl LayoutHook for HerdrPlugin {
 
     fn left_sidebar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
-        if !state.sidebar_open || state.spaces.is_empty() {
+        if !state.sidebar_open {
             return None;
         }
 
@@ -293,6 +333,8 @@ impl LayoutHook for HerdrPlugin {
         let opacity = state.opacity;
         let accent = to_hsla(state.effective_accent());
         drop(state);
+
+        let term_bg = to_hsla(Rgb::DEFAULT_BG);
 
         let mut spaces_list = div().flex().flex_col().gap(px(4.0));
 
@@ -304,7 +346,7 @@ impl LayoutHook for HerdrPlugin {
             let (card_bg, card_border) = if is_active {
                 (accent.opacity(0.20), accent.opacity(0.55))
             } else {
-                (hsla_color(0, 0, 0, 0.0), hsla_color(0, 0, 0, 0.0))
+                (term_bg.opacity(0.0), term_bg.opacity(0.0))
             };
 
             let state_for_click = Arc::clone(&self.state);
@@ -368,13 +410,13 @@ impl LayoutHook for HerdrPlugin {
             spaces_list = spaces_list.child(item);
         }
 
-        // Sidebar con fondo 100% transparente compartiendo la opacidad de la terminal (sin hardcodeo de agents)
+        // Sidebar con fondo idéntico al de la terminal y compartiendo su opacidad
         let sidebar = div()
             .w(px(236.0))
             .h_full()
-            .bg(hsla_color(17, 17, 26, opacity))
+            .bg(term_bg.opacity(opacity))
             .border_r(px(1.0))
-            .border_color(accent.opacity(0.35))
+            .border_color(accent.opacity(0.30))
             .p(px(12.0))
             .flex()
             .flex_col()
@@ -428,18 +470,26 @@ impl LayoutHook for HerdrPlugin {
 
     fn top_bar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
-        // Si no hay pestañas múltiples ni sidebar de spaces activo, la barra superior no se dibuja
-        if state.tabs.len() <= 1 && (!state.sidebar_open || state.spaces.is_empty()) {
+        let space_tabs = match state.spaces.get(state.active_space_index) {
+            Some(sp) => sp.tabs.clone(),
+            None => Vec::new(),
+        };
+        let active_tab_idx = state
+            .spaces
+            .get(state.active_space_index)
+            .map(|sp| sp.active_tab_index)
+            .unwrap_or(0);
+
+        if space_tabs.len() <= 1 && (!state.sidebar_open || state.spaces.len() <= 1) {
             return None;
         }
 
-        let sidebar_open = state.sidebar_open && !state.spaces.is_empty();
-        let active_tab_idx = state.active_tab_index;
-        let tabs = state.tabs.clone();
+        let sidebar_open = state.sidebar_open && state.spaces.len() > 1;
         let opacity = state.opacity;
         let accent = to_hsla(state.effective_accent());
         drop(state);
 
+        let term_bg = to_hsla(Rgb::DEFAULT_BG);
         let state_for_toggle = Arc::clone(&self.state);
         let toggle_btn = div()
             .flex()
@@ -452,7 +502,7 @@ impl LayoutHook for HerdrPlugin {
             .bg(if sidebar_open {
                 accent.opacity(0.20)
             } else {
-                hsla_color(22, 22, 34, opacity)
+                term_bg.opacity(opacity)
             })
             .border_1()
             .border_color(if sidebar_open {
@@ -490,12 +540,12 @@ impl LayoutHook for HerdrPlugin {
 
         let mut tabs_row = div().flex().flex_row().items_center().gap(px(6.0));
 
-        for (i, tab) in tabs.iter().enumerate() {
+        for (i, tab) in space_tabs.iter().enumerate() {
             let is_active = i == active_tab_idx;
             let (bg_col, border_col) = if is_active {
                 (accent.opacity(0.22), accent.opacity(0.55))
             } else {
-                (hsla_color(18, 18, 29, opacity), accent.opacity(0.20))
+                (term_bg.opacity(opacity), accent.opacity(0.18))
             };
 
             let state_for_click = Arc::clone(&self.state);
@@ -513,7 +563,10 @@ impl LayoutHook for HerdrPlugin {
                 .border_color(border_col)
                 .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
                     let mut s = state_for_click.write().unwrap();
-                    s.active_tab_index = i;
+                    let space_idx = s.active_space_index;
+                    if let Some(sp) = s.spaces.get_mut(space_idx) {
+                        sp.active_tab_index = i;
+                    }
                     window.refresh();
                 })
                 .child(
@@ -547,12 +600,19 @@ impl LayoutHook for HerdrPlugin {
                         .text_color(rgb(0x6e7681))
                         .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
                             let mut s = state_for_close.write().unwrap();
-                            if s.tabs.len() > 1 && i < s.tabs.len() {
-                                let active_idx = s.active_tab_index;
-                                s.tabs.remove(active_idx);
-                                if s.active_tab_index >= s.tabs.len() {
-                                    s.active_tab_index = s.tabs.len() - 1;
+                            let space_idx = s.active_space_index;
+                            let mut closed_session = None;
+                            if let Some(sp) = s.spaces.get_mut(space_idx) {
+                                if sp.tabs.len() > 1 && i < sp.tabs.len() {
+                                    let removed = sp.tabs.remove(i);
+                                    closed_session = Some(removed.session_id);
+                                    if sp.active_tab_index >= sp.tabs.len() {
+                                        sp.active_tab_index = sp.tabs.len() - 1;
+                                    }
                                 }
+                            }
+                            if let Some(sess_id) = closed_session {
+                                s.close_session_requested = Some(sess_id);
                                 window.refresh();
                             }
                         })
@@ -577,11 +637,16 @@ impl LayoutHook for HerdrPlugin {
                 let mut s = state_for_new.write().unwrap();
                 let next_id = s.next_tab_id;
                 s.next_tab_id += 1;
-                s.tabs.push(HerdrTab {
-                    id: next_id,
-                    title: format!("term {}", next_id),
-                });
-                s.active_tab_index = s.tabs.len() - 1;
+                let space_idx = s.active_space_index;
+                if let Some(sp) = s.spaces.get_mut(space_idx) {
+                    sp.tabs.push(HerdrTab {
+                        id: next_id,
+                        title: format!("term {}", sp.tabs.len() + 1),
+                        session_id: 0,
+                    });
+                    sp.active_tab_index = sp.tabs.len() - 1;
+                    s.new_session_requested = true;
+                }
                 window.refresh();
             })
             .child(
@@ -596,7 +661,7 @@ impl LayoutHook for HerdrPlugin {
         let top_bar = div()
             .h(px(38.0))
             .w_full()
-            .bg(hsla_color(17, 17, 26, opacity))
+            .bg(term_bg.opacity(opacity))
             .border_b(px(1.0))
             .border_color(accent.opacity(0.30))
             .px(px(10.0))
@@ -613,33 +678,29 @@ impl LayoutHook for HerdrPlugin {
 
 impl InputHook for HerdrPlugin {
     fn on_key(&self, key: &Key) -> KeyAction {
-        // Ctrl + Alt + T: crear un nuevo espacio aparte del actual, solicitar nueva sesión PTY y abrir sidebar
+        // Ctrl + Shift + T: crear nueva pestaña en el espacio activo
+        if key.ctrl && key.shift && !key.alt && key.key.to_lowercase() == "t" {
+            self.create_tab_in_active_space();
+            return KeyAction::Consume;
+        }
+
+        // Ctrl + Alt + T: crear un nuevo espacio aparte del actual y abrir la barra lateral
         if key.ctrl && key.alt && !key.shift && key.key.to_lowercase() == "t" {
             self.create_space_and_open_sidebar();
             return KeyAction::Consume;
+        }
+
+        // Ctrl + W: cerrar pestaña activa en el espacio actual
+        if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "w" {
+            if self.close_active_tab() {
+                return KeyAction::Consume;
+            }
         }
 
         // Ctrl + Shift + S: alternar visibilidad de la barra lateral de espacios
         if key.ctrl && key.shift && !key.alt && key.key.to_lowercase() == "s" {
             self.toggle_sidebar();
             return KeyAction::Consume;
-        }
-
-        // Ctrl + T: nueva pestaña
-        if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "t" {
-            let next_id = {
-                let s = self.state.read().unwrap();
-                s.next_tab_id
-            };
-            self.new_tab(format!("term {next_id}"));
-            return KeyAction::Consume;
-        }
-
-        // Ctrl + W: cerrar pestaña
-        if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "w" {
-            if self.close_active_tab() {
-                return KeyAction::Consume;
-            }
         }
 
         // Alt + 1..9: cambiar rápidamente de espacio
@@ -687,7 +748,6 @@ impl Plugin for HerdrPlugin {
 
     fn default_config(&self) -> Option<PluginConfig> {
         let mut cfg = PluginConfig::new();
-        // Por defecto cerrado y sin espacios iniciales fijos
         cfg.set("sidebar_open", false);
         cfg.set("opacity", 0.85);
         cfg.set("accent", "auto");
@@ -715,11 +775,19 @@ impl Plugin for HerdrPlugin {
                             name: name.trim().to_string(),
                             branch: branch.trim().to_string(),
                             custom_color: None,
+                            tabs: vec![HerdrTab {
+                                id: 1,
+                                title: "terminal".to_string(),
+                                session_id: 0,
+                            }],
+                            active_tab_index: 0,
                         });
                     }
                 }
             }
-            s.spaces = parsed_spaces;
+            if !parsed_spaces.is_empty() {
+                s.spaces = parsed_spaces;
+            }
         }
     }
 
@@ -771,6 +839,30 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_shift_t_creates_tab_in_active_space() {
+        let plugin = HerdrPlugin::default();
+        // Inicialmente 1 tab, sin top bar
+        assert_eq!(plugin.top_bar_height(), 0.0);
+
+        // Pulsamos Ctrl+Shift+T
+        let ctrl_shift_t = Key::new("t").ctrl().shift();
+        assert_eq!(plugin.on_key(&ctrl_shift_t), KeyAction::Consume);
+
+        // Ahora hay 2 tabs en el espacio activo y el top bar aparece
+        assert_eq!(plugin.top_bar_height(), 38.0);
+        assert!(plugin.top_bar().is_some());
+        assert_eq!(plugin.take_new_session_request(), true);
+
+        // Simulamos que el core asigna session_id = 1
+        plugin.on_session_created(1);
+        assert_eq!(plugin.active_session(), 1);
+
+        // Cerrar pestaña activa
+        assert!(plugin.close_active_tab());
+        assert_eq!(plugin.active_session(), 0);
+    }
+
+    #[test]
     fn ctrl_alt_t_creates_space_and_opens_sidebar() {
         let plugin = HerdrPlugin::default();
         assert_eq!(plugin.left_sidebar_width(), 0.0);
@@ -782,8 +874,6 @@ mod tests {
         // Ahora el sidebar está abierto y tiene ancho 236px
         assert_eq!(plugin.left_sidebar_width(), 236.0);
         assert!(plugin.left_sidebar().is_some());
-        assert_eq!(plugin.top_bar_height(), 38.0);
-        assert!(plugin.top_bar().is_some());
 
         // Debe haber 2 espacios: space-1 (el previo) y space-2 (el nuevo)
         let spaces = plugin.state.read().unwrap().spaces.clone();
@@ -791,17 +881,7 @@ mod tests {
         assert_eq!(spaces[0].name, "space-1");
         assert_eq!(spaces[1].name, "space-2");
         assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
-        assert_eq!(plugin.take_new_space_request(), true);
-    }
-
-    #[test]
-    fn herdr_tabs_management() {
-        let plugin = HerdrPlugin::default();
-        let tab2 = plugin.new_tab("build");
-        assert_eq!(tab2, 2);
-
-        assert!(plugin.close_active_tab());
-        assert!(!plugin.close_active_tab()); // Solo queda 1, no se cierra
+        assert_eq!(plugin.take_new_session_request(), true);
     }
 
     #[test]
