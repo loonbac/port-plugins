@@ -6,7 +6,7 @@
 //!
 //! Si no hay ningún programa corriendo, la terminal se cierra sin preguntar.
 
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use port_plugin_api::{CloseDecision, LifecycleHook, Plugin, PluginConfig};
 
@@ -15,14 +15,17 @@ use port_plugin_api::{CloseDecision, LifecycleHook, Plugin, PluginConfig};
 const IGNORED: &[&str] = &["true", "echo", "printf", "sleep"];
 
 /// Plugin que protege frente a cierres accidentales con trabajo en curso.
-#[derive(Default)]
+///
+/// Es clonable a propósito: la app registra una copia en el registro de plugins
+/// y conserva otra para responder desde el manejador de cierre de la ventana.
+#[derive(Default, Clone)]
 pub struct CloseGuardPlugin {
     /// Si el diálogo de confirmación está visible.
-    dialog_open: RwLock<bool>,
+    dialog_open: Arc<RwLock<bool>>,
     /// Programas detectados en el momento de pedir el cierre.
-    pending: RwLock<Vec<String>>,
+    pending: Arc<RwLock<Vec<String>>>,
     /// Recordatorio de cuántas veces se pidió confirmación, útil para pruebas.
-    ask_count: RwLock<u32>,
+    ask_count: Arc<RwLock<u32>>,
 }
 
 impl CloseGuardPlugin {
