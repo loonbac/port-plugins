@@ -52,10 +52,8 @@ impl FontPlugin {
 }
 
 impl AppearanceHook for FontPlugin {
-    fn font_family(&self) -> Option<&'static str> {
-        let fam = self.family.read().unwrap();
-        // Fuga intencionada a static para familias configuradas en tiempo de ejecución
-        Some(Box::leak(fam.clone().into_boxed_str()))
+    fn font_family(&self) -> Option<String> {
+        Some(self.family.read().unwrap().clone())
     }
 
     fn font_size(&self) -> Option<f32> {
@@ -110,7 +108,7 @@ mod tests {
     #[test]
     fn font_plugin_defaults() {
         let plugin = FontPlugin::new("FiraCode Nerd Font Mono");
-        assert_eq!(plugin.font_family(), Some("FiraCode Nerd Font Mono"));
+        assert_eq!(plugin.font_family(), Some("FiraCode Nerd Font Mono".to_string()));
         assert_eq!(plugin.font_size(), None);
         assert_eq!(plugin.font_fallbacks(), None);
     }
@@ -121,7 +119,10 @@ mod tests {
             .with_size(15.0)
             .with_fallbacks(vec!["Symbols Nerd Font Mono".to_string()]);
 
-        assert_eq!(plugin.font_family(), Some("JetBrainsMono Nerd Font Mono"));
+        assert_eq!(
+            plugin.font_family(),
+            Some("JetBrainsMono Nerd Font Mono".to_string())
+        );
         assert_eq!(plugin.font_size(), Some(15.0));
         assert_eq!(
             plugin.font_fallbacks(),
@@ -135,6 +136,6 @@ mod tests {
         let mut cfg = PluginConfig::new();
         cfg.set("family", "DejaVu Sans Mono");
         plugin.load_config(&cfg);
-        assert_eq!(plugin.font_family(), Some("DejaVu Sans Mono"));
+        assert_eq!(plugin.font_family(), Some("DejaVu Sans Mono".to_string()));
     }
 }

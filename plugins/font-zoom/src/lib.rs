@@ -12,35 +12,35 @@ use port_term_core::input::Key;
 
 /// Plugin para zoom interactivo de tipografía.
 pub struct FontZoomPlugin {
-    base_size: f32,
+    base_size: RwLock<f32>,
     current_size: RwLock<f32>,
-    step: f32,
-    min_size: f32,
-    max_size: f32,
+    step: RwLock<f32>,
+    min_size: RwLock<f32>,
+    max_size: RwLock<f32>,
 }
 
 impl FontZoomPlugin {
     /// Crea una nueva instancia con el tamaño base deseado (ej. 14.0 pt).
     pub fn new(base_size: f32) -> Self {
         Self {
-            base_size,
+            base_size: RwLock::new(base_size),
             current_size: RwLock::new(base_size),
-            step: 1.0,
-            min_size: 6.0,
-            max_size: 72.0,
+            step: RwLock::new(1.0),
+            min_size: RwLock::new(6.0),
+            max_size: RwLock::new(72.0),
         }
     }
 
     /// Personaliza el paso de incremento/decremento en puntos.
-    pub fn with_step(mut self, step: f32) -> Self {
-        self.step = step;
+    pub fn with_step(self, step: f32) -> Self {
+        *self.step.write().unwrap() = step;
         self
     }
 
     /// Personaliza los límites mínimo y máximo.
-    pub fn with_limits(mut self, min: f32, max: f32) -> Self {
-        self.min_size = min;
-        self.max_size = max;
+    pub fn with_limits(self, min: f32, max: f32) -> Self {
+        *self.min_size.write().unwrap() = min;
+        *self.max_size.write().unwrap() = max;
         self
     }
 
@@ -51,28 +51,35 @@ impl FontZoomPlugin {
 
     /// Define directamente el tamaño actual.
     pub fn set_size(&self, size: f32) {
+        let min = *self.min_size.read().unwrap();
+        let max = *self.max_size.read().unwrap();
         let mut cur = self.current_size.write().unwrap();
-        *cur = size.clamp(self.min_size, self.max_size);
+        *cur = size.clamp(min, max);
     }
 
     /// Aumenta el tamaño en un paso.
     pub fn zoom_in(&self) -> f32 {
+        let step = *self.step.read().unwrap();
+        let max = *self.max_size.read().unwrap();
         let mut cur = self.current_size.write().unwrap();
-        *cur = (*cur + self.step).min(self.max_size);
+        *cur = (*cur + step).min(max);
         *cur
     }
 
     /// Disminuye el tamaño en un paso.
     pub fn zoom_out(&self) -> f32 {
+        let step = *self.step.read().unwrap();
+        let min = *self.min_size.read().unwrap();
         let mut cur = self.current_size.write().unwrap();
-        *cur = (*cur - self.step).max(self.min_size);
+        *cur = (*cur - step).max(min);
         *cur
     }
 
     /// Restablece el tamaño al valor base original.
     pub fn reset_zoom(&self) -> f32 {
+        let base = *self.base_size.read().unwrap();
         let mut cur = self.current_size.write().unwrap();
-        *cur = self.base_size;
+        *cur = base;
         *cur
     }
 
@@ -158,29 +165,35 @@ impl Plugin for FontZoomPlugin {
 
     fn default_config(&self) -> Option<PluginConfig> {
         let mut config = PluginConfig::new();
-        config.set("default_size", self.base_size);
-        config.set("step", self.step);
-        config.set("min_size", self.min_size);
-        config.set("max_size", self.max_size);
+        config.set("default_size", *self.base_size.read().unwrap());
+        config.set("step", *self.step.read().unwrap());
+        config.set("min_size", *self.min_size.read().unwrap());
+        config.set("max_size", *self.max_size.read().unwrap());
         Some(config)
     }
 
     fn load_config(&self, config: &PluginConfig) {
         if let Some(size) = config.get_f32("default_size") {
+            *self.base_size.write().unwrap() = size;
             self.set_size(size);
         }
         if let Some(step) = config.get_f32("step") {
-            // Nota: step se puede ajustar si se requiere
-            let _ = step;
+            *self.step.write().unwrap() = step;
+        }
+        if let Some(min) = config.get_f32("min_size") {
+            *self.min_size.write().unwrap() = min;
+        }
+        if let Some(max) = config.get_f32("max_size") {
+            *self.max_size.write().unwrap() = max;
         }
     }
 
     fn save_config(&self) -> Option<PluginConfig> {
         let mut config = PluginConfig::new();
         config.set("default_size", self.size());
-        config.set("step", self.step);
-        config.set("min_size", self.min_size);
-        config.set("max_size", self.max_size);
+        config.set("step", *self.step.read().unwrap());
+        config.set("min_size", *self.min_size.read().unwrap());
+        config.set("max_size", *self.max_size.read().unwrap());
         Some(config)
     }
 }
@@ -256,6 +269,7 @@ mod tests {
         custom_cfg.set("default_size", 18.0);
         plugin.load_config(&custom_cfg);
         assert_eq!(plugin.size(), 18.0);
+        assert_eq!(plugin.reset_zoom(), 18.0);
 
         let saved = plugin.save_config().unwrap();
         assert_eq!(saved.get_f32("default_size"), Some(18.0));
