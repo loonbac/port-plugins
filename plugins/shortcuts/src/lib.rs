@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use port_plugin_api::{InputHook, KeyAction, Plugin};
+use port_plugin_api::{InputHook, KeyAction, Plugin, Services};
 use port_term_core::input::Key;
 
 /// Definición de una combinación de teclas.
@@ -105,9 +105,14 @@ impl Shortcut {
 type ShortcutCallback = Arc<dyn Fn() + Send + Sync + 'static>;
 
 /// Plugin para gestionar atajos de teclado personalizados.
+///
+/// Además de callbacks propios, puede ligar una tecla a una acción publicada por
+/// otro plugin a través del directorio de servicios: así `shortcuts` es el único
+/// dueño de los atajos de PORT.
 #[derive(Default)]
 pub struct ShortcutsPlugin {
     bindings: RwLock<HashMap<Shortcut, ShortcutCallback>>,
+    services: Option<Arc<Services>>,
 }
 
 impl ShortcutsPlugin {
@@ -115,7 +120,34 @@ impl ShortcutsPlugin {
     pub fn new() -> Self {
         Self {
             bindings: RwLock::new(HashMap::new()),
+            services: None,
         }
+    }
+
+    /// Proporciona el directorio de servicios para poder llamar a otros plugins.
+    pub fn with_services(mut self, services: Arc<Services>) -> Self {
+        self.services = Some(services);
+        self
+    }
+
+    /// Liga una tecla a una acción publicada por otro plugin.
+    ///
+    /// El servicio se resuelve en el momento de pulsar la tecla, así que da igual
+    /// el orden de registro: `bind_service("ctrl+=", "font-zoom", "zoom_in")`
+    /// funciona aunque el destino se publique después.
+    pub fn bind_service(&self, pattern: &str, service_id: &str, action: &str) -> bool {
+        let Some(shortcut) = Shortcut::parse(pattern) else {
+            return false;
+        };
+        let services = self.services.clone();
+        let service_id = service_id.to_string();
+        let action = action.to_string();
+        self.bind(shortcut, move || {
+            if let Some(directories) = services.as_ref() {
+                let _ = directories.call(&service_id, &action, &[]);
+            }
+        });
+        true
     }
 
     /// Registra un atajo y su acción correspondiente.
@@ -212,6 +244,50 @@ mod tests {
 
         let other_key = Key::new("w").ctrl().shift();
         assert!(!sc.matches(&other_key));
+    }
+
+    #[test]
+    fn bindings_can_invoke_a_service_published_by_another_plugin() {
+        use port_plugin_api::{Arg, Ret, Service, ServiceError};
+
+        struct Fake;
+        impl Service for Fake {
+            fn id(&self) -> &str {
+                "fake"
+            }
+            fn name(&self) -> &str {
+                "Fake"
+            }
+            fn actions(&self) -> Vec<&'static str> {
+                vec!["ping"]
+            }
+            fn invoke(&self, action: &str, _args: &[Arg]) -> Option<Result<Ret, ServiceError>> {
+                match action {
+                    "ping" => Some(Ok(Ret::Num(42.0))),
+                    _ => None,
+                }
+            }
+        }
+
+        let services = Arc::new(Services::new());
+        services.publish(Arc::new(Fake));
+
+        let plugin = ShortcutsPlugin::new().with_services(Arc::clone(&services));
+        assert!(plugin.bind_service("ctrl+shift+p", "fake", "ping"));
+
+        let ctrl_shift_p = Key::new("p").ctrl().shift();
+        assert_eq!(plugin.on_key(&ctrl_shift_p), KeyAction::Consume);
+    }
+
+    #[test]
+    fn a_service_binding_survives_the_service_not_being_there() {
+        // Resolver en el momento de pulsar hace que da igual el orden de
+        // registro: si el servicio no existe, el atajo simplemente no hace nada.
+        let plugin = ShortcutsPlugin::new();
+        assert!(plugin.bind_service("ctrl+shift+q", "nope", "ping"));
+
+        let ctrl_shift_q = Key::new("q").ctrl().shift();
+        assert_eq!(plugin.on_key(&ctrl_shift_q), KeyAction::Consume);
     }
 
     #[test]

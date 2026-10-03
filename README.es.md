@@ -42,6 +42,15 @@ Deliberadamente **no registra ningún atajo**. Enlazar esas acciones a teclas es
 trabajo del plugin `shortcuts`, así el zoom se puede asociar a otras teclas, o
 dejarlo sin atajo, sin tocar este plugin.
 
+Expone esa capacidad como servicio para que otros plugins puedan manejarla:
+
+| Servicio | Acción | Devuelve |
+|---|---|---|
+| `font-zoom` | `zoom_in` | Tamaño nuevo |
+| `font-zoom` | `zoom_out` | Tamaño nuevo |
+| `font-zoom` | `reset` | Tamaño base |
+| `font-zoom` | `size` | Tamaño actual |
+
 ### `shortcuts`
 
 Asocia combinaciones arbitrarias de teclas a callbacks, con una sintaxis compacta
@@ -55,11 +64,11 @@ let shortcuts = ShortcutsPlugin::new();
 // Su propio atajo.
 shortcuts.bind_str("ctrl+shift+k", || println!("¡Hola!"));
 
-// Manejando la capacidad de otro plugin.
-let zoom = FontZoomPlugin::new(14.0);
-shortcuts.bind_str("ctrl+=", move || zoom.zoom_in());
-shortcuts.bind_str("ctrl+-", move || zoom.zoom_out());
-shortcuts.bind_str("ctrl+0", move || zoom.reset_zoom());
+// Manejando el servicio publicado por otro plugin: sin tipos compartidos,
+// se resuelve al pulsar la tecla.
+shortcuts.bind_service("ctrl+=", "font-zoom", "zoom_in");
+shortcuts.bind_service("ctrl+-", "font-zoom", "zoom_out");
+shortcuts.bind_service("ctrl+0", "font-zoom", "reset");
 ```
 
 Los bindings que usa la configuración instalada son:
@@ -161,7 +170,7 @@ fn main() {
 
 ```bash
 nix-shell      # librerías nativas enlazadas
-cargo test     # 37 tests unitarios
+cargo test     # 39 tests unitarios
 cargo build --release
 ```
 

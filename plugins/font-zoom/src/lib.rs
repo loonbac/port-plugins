@@ -10,7 +10,9 @@
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 
-use port_plugin_api::{AppearanceHook, ConfigFile, Plugin, PluginConfig};
+use port_plugin_api::{
+    AppearanceHook, Arg, ConfigFile, Plugin, PluginConfig, Ret, Service, ServiceError,
+};
 
 /// Plugin para zoom interactivo de tipografía.
 ///
@@ -115,9 +117,40 @@ impl AppearanceHook for FontZoomPlugin {
     }
 }
 
+/// Servicio que publica el zoom para que otros plugins lo invoquen.
+struct FontZoomService(FontZoomPlugin);
+
+impl Service for FontZoomService {
+    fn id(&self) -> &str {
+        "font-zoom"
+    }
+
+    fn name(&self) -> &str {
+        "Font Zoom"
+    }
+
+    fn actions(&self) -> Vec<&'static str> {
+        vec!["zoom_in", "zoom_out", "reset", "size"]
+    }
+
+    fn invoke(&self, action: &str, _args: &[Arg]) -> Option<Result<Ret, ServiceError>> {
+        match action {
+            "zoom_in" => Some(Ok(Ret::Num(self.0.zoom_in()))),
+            "zoom_out" => Some(Ok(Ret::Num(self.0.zoom_out()))),
+            "reset" => Some(Ok(Ret::Num(self.0.reset_zoom()))),
+            "size" => Some(Ok(Ret::Num(self.0.size()))),
+            _ => None,
+        }
+    }
+}
+
 impl Plugin for FontZoomPlugin {
     fn id(&self) -> &'static str {
         "font-zoom"
+    }
+
+    fn services(&self) -> Vec<Arc<dyn Service>> {
+        vec![Arc::new(FontZoomService(self.clone()))]
     }
 
     fn name(&self) -> &'static str {

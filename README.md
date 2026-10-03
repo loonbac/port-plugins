@@ -39,6 +39,15 @@ It deliberately registers **no key bindings**. Wiring those actions to keys is
 the job of the `shortcuts` plugin, so the zoom can be bound to different keys, or
 to none at all, without touching this plugin.
 
+It exposes that capability as a service, so other plugins can drive it:
+
+| Service · Servicio | Action · Acción | Returns · Devuelve |
+|---|---|---|
+| `font-zoom` | `zoom_in` | New size · Tamaño nuevo |
+| `font-zoom` | `zoom_out` | New size · Tamaño nuevo |
+| `font-zoom` | `reset` | Base size · Tamaño base |
+| `font-zoom` | `size` | Current size · Tamaño actual |
+
 ### `shortcuts`
 
 Bind arbitrary key combinations to callbacks, with a compact `ctrl+shift+t`
@@ -52,11 +61,10 @@ let shortcuts = ShortcutsPlugin::new();
 // Its own binding.
 shortcuts.bind_str("ctrl+shift+k", || println!("Hello!"));
 
-// Driving another plugin's capability.
-let zoom = FontZoomPlugin::new(14.0);
-shortcuts.bind_str("ctrl+=", move || zoom.zoom_in());
-shortcuts.bind_str("ctrl+-", move || zoom.zoom_out());
-shortcuts.bind_str("ctrl+0", move || zoom.reset_zoom());
+// Driving another plugin's published service: no types shared, resolved on keypress.
+shortcuts.bind_service("ctrl+=", "font-zoom", "zoom_in");
+shortcuts.bind_service("ctrl+-", "font-zoom", "zoom_out");
+shortcuts.bind_service("ctrl+0", "font-zoom", "reset");
 ```
 
 The bindings used by the shipped configuration are:
@@ -157,7 +165,7 @@ fn main() {
 
 ```bash
 nix-shell      # native libraries linked
-cargo test     # 37 unit tests
+cargo test     # 39 unit tests
 cargo build --release
 ```
 
