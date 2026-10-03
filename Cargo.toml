@@ -6,6 +6,7 @@ members = [
     "plugins/font-zoom",
     "plugins/shortcuts",
     "plugins/menu-customizer",
+    "plugins/herdr",
 ]
 
 [workspace.package]

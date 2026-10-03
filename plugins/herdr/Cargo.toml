@@ -1,0 +1,11 @@
+[package]
+name = "port-plugin-herdr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PORT Plugin: Herdr customization plugin con spaces en sidebar, tabs superiores y estética Herdr"
+
+[dependencies]
+port-plugin-api = { workspace = true }
+port-term-core = { workspace = true }
+gpui = { workspace = true }
