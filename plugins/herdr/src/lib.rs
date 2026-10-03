@@ -736,14 +736,16 @@ impl LayoutHook for HerdrPlugin {
 
         shell = shell.child(handle);
 
-        // Mientras se arrastra, una capa invisible cubre el resto de la ventana
-        // para seguir recibiendo movimiento aunque el cursor abandone el asidero.
+        // Mientras se arrastra, una capa invisible cubre toda la ventana para
+        // seguir recibiendo movimiento. Debe abarcar también hacia la IZQUIERDA
+        // del asidero: estrechar implica mover el cursor hacia atrás, y si la
+        // capa empezara en el borde el rastreo se perdería al primer paso.
         if resizing {
             let state_for_move = Arc::clone(&self.state);
             let state_for_end = Arc::clone(&self.state);
             let overlay = div()
                 .absolute()
-                .left(px(width))
+                .left(px(0.0))
                 .top(px(0.0))
                 .h_full()
                 .w(px(6000.0))
@@ -1301,6 +1303,26 @@ mod tests {
         assert!(!plugin.is_resizing());
         assert!(!plugin.update_resize(500.0), "sin arrastre activo no debe cambiar");
         assert_eq!(plugin.sidebar_width(), 236.0);
+    }
+
+    #[test]
+    fn dragging_left_narrows_the_sidebar_down_to_the_limit() {
+        let plugin = HerdrPlugin::default();
+        plugin.set_sidebar_width(300.0);
+        plugin.begin_resize(300.0);
+
+        // Estrechar: el cursor avanza en X negativas respecto al asidero.
+        assert!(plugin.update_resize(260.0));
+        assert_eq!(plugin.sidebar_width(), 260.0);
+
+        assert!(plugin.update_resize(200.0));
+        assert_eq!(plugin.sidebar_width(), 200.0);
+
+        // Más allá del mínimo queda fijado en el límite inferior.
+        assert!(plugin.update_resize(40.0));
+        assert_eq!(plugin.sidebar_width(), SIDEBAR_MIN_WIDTH);
+        assert!(plugin.update_resize(0.0));
+        assert_eq!(plugin.sidebar_width(), SIDEBAR_MIN_WIDTH);
     }
 
     #[test]
