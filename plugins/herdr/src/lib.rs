@@ -134,6 +134,16 @@ fn app_identity(app: &RunningApp) -> (char, String) {
     )
 }
 
+/// Ancho por defecto de la barra lateral de espacios, en píxeles lógicos.
+pub const SIDEBAR_DEFAULT_WIDTH: f32 = 236.0;
+/// Ancho mínimo: por debajo el nombre de las ramas deja de caber.
+pub const SIDEBAR_MIN_WIDTH: f32 = 170.0;
+/// Ancho máximo: evita que el sidebar se coma toda la ventana.
+pub const SIDEBAR_MAX_WIDTH: f32 = 520.0;
+/// Zona sensible del asidero, en píxeles. Centrada en el borde, se extiende
+/// medio ancho a cada lado para que el arrastre no sea preciso al píxel.
+const RESIZE_HANDLE_HIT: f32 = 7.0;
+
 /// Convierte `opencode` en `Opencode` para mostrarlo como nombre legible.
 fn humanize(bin: &str) -> String {
     let mut chars = bin.chars();
@@ -166,6 +176,12 @@ pub struct HerdrState {
     pub accent_mode: String,
     pub new_session_requested: bool,
     pub close_session_requested: Option<usize>,
+    /// Ancho actual de la barra lateral, ajustable arrastrando el asidero.
+    pub sidebar_width: f32,
+    /// Posición X donde empezó el arrastre de ancho, si lo hay.
+    resize_anchor_x: Option<f32>,
+    /// Ancho que tenía la barra cuando empezó el arrastre.
+    resize_start_width: f32,
     next_tab_id: usize,
     next_space_num: usize,
 }
@@ -204,6 +220,9 @@ impl Default for HerdrState {
             accent_mode: "auto".to_string(),
             new_session_requested: false,
             close_session_requested: None,
+            sidebar_width: SIDEBAR_DEFAULT_WIDTH,
+            resize_anchor_x: None,
+            resize_start_width: SIDEBAR_DEFAULT_WIDTH,
             next_tab_id: 2,
             next_space_num: 2,
         }
@@ -296,6 +315,46 @@ impl HerdrPlugin {
             }
         }
         false
+    }
+
+    /// Selecciona un espacio por índice.
+    /// Ancho actual de la barra lateral.
+    pub fn sidebar_width(&self) -> f32 {
+        self.state.read().unwrap().sidebar_width
+    }
+
+    /// Fija el ancho de la barra lateral, limitado a un rango usable.
+    pub fn set_sidebar_width(&self, width: f32) {
+        self.state.write().unwrap().sidebar_width =
+            width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    }
+
+    /// Indica si hay un arrastre de ancho en curso.
+    pub fn is_resizing(&self) -> bool {
+        self.state.read().unwrap().resize_anchor_x.is_some()
+    }
+
+    /// Comienza el arrastre de ancho en la coordenada X indicada.
+    pub fn begin_resize(&self, x: f32) {
+        let mut s = self.state.write().unwrap();
+        s.resize_anchor_x = Some(x);
+        s.resize_start_width = s.sidebar_width;
+    }
+
+    /// Continúa el arrastre aplicando el desplazamiento del cursor.
+    pub fn update_resize(&self, x: f32) -> bool {
+        let mut s = self.state.write().unwrap();
+        let Some(anchor) = s.resize_anchor_x else {
+            return false;
+        };
+        let next = s.resize_start_width + (x - anchor);
+        s.sidebar_width = next.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+        true
+    }
+
+    /// Termina el arrastre de ancho.
+    pub fn end_resize(&self) {
+        self.state.write().unwrap().resize_anchor_x = None;
     }
 
     /// Selecciona un espacio por índice.
@@ -474,7 +533,7 @@ impl LayoutHook for HerdrPlugin {
     fn left_sidebar_width(&self) -> f32 {
         let s = self.state.read().unwrap();
         if s.spaces.len() > 1 {
-            236.0
+            s.sidebar_width
         } else {
             0.0
         }
@@ -506,6 +565,8 @@ impl LayoutHook for HerdrPlugin {
         let spaces = state.spaces.clone();
         let opacity = state.opacity;
         let accent = to_hsla(state.effective_accent());
+        let state_sidebar_width = state.sidebar_width;
+        let state_is_resizing = state.resize_anchor_x.is_some();
         drop(state);
 
         let term_bg = to_hsla(Rgb::DEFAULT_BG);
@@ -584,8 +645,10 @@ impl LayoutHook for HerdrPlugin {
         }
 
         // Sidebar con fondo idéntico al de la terminal y compartiendo su opacidad
+        let width = state_sidebar_width;
+        let resizing = state_is_resizing;
         let sidebar = div()
-            .w(px(236.0))
+            .w(px(width))
             .h_full()
             .bg(term_bg.opacity(opacity))
             .border_r(px(1.0))
@@ -638,7 +701,77 @@ impl LayoutHook for HerdrPlugin {
                     .child("Ctrl+Alt+T Nuevo espacio"),
             );
 
-        Some(sidebar.into_any_element())
+        // Contenedor relativo: el asidero y la capa de arrastre se posicionan
+        // contra su borde derecho.
+        let mut shell = div().relative().w(px(width)).h_full().child(sidebar);
+
+        // Asidero de ancho: zona sensible centrada en el borde derecho.
+        let state_for_begin = Arc::clone(&self.state);
+        let handle = div()
+            .absolute()
+            .left(px(width - RESIZE_HANDLE_HIT))
+            .top(px(0.0))
+            .h_full()
+            .w(px(RESIZE_HANDLE_HIT * 2.0))
+            .cursor_col_resize()
+            .child(
+                // Pista visual de que el borde es agarrable.
+                div()
+                    .absolute()
+                    .right(px(0.0))
+                    .top(px(0.0))
+                    .h_full()
+                    .w(px(2.0))
+                    .bg(accent.opacity(0.0)),
+            )
+            .on_mouse_down(MouseButton::Left, move |event, window, _cx| {
+                let x: f32 = event.position.x.into();
+                {
+                    let mut s = state_for_begin.write().unwrap();
+                    s.resize_anchor_x = Some(x);
+                    s.resize_start_width = s.sidebar_width;
+                }
+                window.refresh();
+            });
+
+        shell = shell.child(handle);
+
+        // Mientras se arrastra, una capa invisible cubre el resto de la ventana
+        // para seguir recibiendo movimiento aunque el cursor abandone el asidero.
+        if resizing {
+            let state_for_move = Arc::clone(&self.state);
+            let state_for_end = Arc::clone(&self.state);
+            let overlay = div()
+                .absolute()
+                .left(px(width))
+                .top(px(0.0))
+                .h_full()
+                .w(px(6000.0))
+                .cursor_col_resize()
+                .on_mouse_move(move |event, window, _cx| {
+                    let x: f32 = event.position.x.into();
+                    if {
+                        let mut s = state_for_move.write().unwrap();
+                        match s.resize_anchor_x {
+                            Some(anchor) => {
+                                s.sidebar_width = (s.resize_start_width + (x - anchor))
+                                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                                true
+                            }
+                            None => false,
+                        }
+                    } {
+                        window.refresh();
+                    }
+                })
+                .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
+                    state_for_end.write().unwrap().resize_anchor_x = None;
+                    window.refresh();
+                });
+            shell = shell.child(overlay);
+        }
+
+        Some(shell.into_any_element())
     }
 
     fn top_bar(&self) -> Option<AnyElement> {
@@ -913,6 +1046,7 @@ impl Plugin for HerdrPlugin {
         let mut cfg = PluginConfig::new();
         cfg.set("opacity", 0.85);
         cfg.set("accent", "auto");
+        cfg.set("sidebar_width", SIDEBAR_DEFAULT_WIDTH);
         cfg.set("spaces", "");
         Some(cfg)
     }
@@ -924,6 +1058,10 @@ impl Plugin for HerdrPlugin {
         }
         if let Some(acc) = config.get("accent") {
             s.accent_mode = acc.to_string();
+        }
+        if let Some(width) = config.get_f32("sidebar_width") {
+            s.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+            s.resize_start_width = s.sidebar_width;
         }
         if let Some(spaces_str) = config.get("spaces") {
             let mut parsed_spaces = Vec::new();
@@ -956,6 +1094,7 @@ impl Plugin for HerdrPlugin {
         let mut cfg = PluginConfig::new();
         cfg.set("opacity", s.opacity);
         cfg.set("accent", s.accent_mode.clone());
+        cfg.set("sidebar_width", s.sidebar_width);
         let spaces_str = s
             .spaces
             .iter()
@@ -1113,6 +1252,55 @@ mod tests {
             "una pestaña nueva no debe mostrar la app de otra sesión"
         );
         assert_eq!(s.spaces[0].tabs[1].session_id, 1);
+    }
+
+    #[test]
+    fn sidebar_width_is_clamped_to_usable_bounds() {
+        let plugin = HerdrPlugin::default();
+        assert_eq!(plugin.sidebar_width(), SIDEBAR_DEFAULT_WIDTH);
+
+        plugin.set_sidebar_width(9999.0);
+        assert_eq!(plugin.sidebar_width(), SIDEBAR_MAX_WIDTH);
+
+        plugin.set_sidebar_width(10.0);
+        assert_eq!(plugin.sidebar_width(), SIDEBAR_MIN_WIDTH);
+
+        plugin.set_sidebar_width(320.0);
+        assert_eq!(plugin.sidebar_width(), 320.0);
+    }
+
+    #[test]
+    fn sidebar_width_is_persisted_in_config() {
+        let plugin = HerdrPlugin::default();
+        plugin.set_sidebar_width(300.0);
+        let saved = plugin.save_config().unwrap();
+        assert_eq!(saved.get_f32("sidebar_width"), Some(300.0));
+
+        // Una sesión nueva debe recuperar el ancho guardado.
+        let other = HerdrPlugin::default();
+        other.load_config(&saved);
+        assert_eq!(other.sidebar_width(), 300.0);
+    }
+
+    #[test]
+    fn dragging_the_handle_changes_the_width_from_the_cursor_delta() {
+        let plugin = HerdrPlugin::default();
+        plugin.set_sidebar_width(236.0);
+        plugin.begin_resize(236.0);
+        assert!(plugin.is_resizing());
+
+        // Arrastrar 60 px a la derecha ensancha la barra 60 px.
+        assert!(plugin.update_resize(296.0));
+        assert_eq!(plugin.sidebar_width(), 296.0);
+
+        // Arrastrar de vuelta la devuelve al ancho original.
+        assert!(plugin.update_resize(236.0));
+        assert_eq!(plugin.sidebar_width(), 236.0);
+
+        plugin.end_resize();
+        assert!(!plugin.is_resizing());
+        assert!(!plugin.update_resize(500.0), "sin arrastre activo no debe cambiar");
+        assert_eq!(plugin.sidebar_width(), 236.0);
     }
 
     #[test]
