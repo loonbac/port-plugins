@@ -3865,6 +3865,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-plugin-close-guard"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "port-plugin-api",
+]
+
+[[package]]
 name = "port-plugin-font"
 version = "0.1.0"
 dependencies = [
