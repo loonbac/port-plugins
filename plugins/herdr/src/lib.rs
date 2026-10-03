@@ -65,6 +65,10 @@ pub struct HerdrTab {
     pub app: Option<RunningApp>,
 }
 
+/// Identificador centinela para una pestaña que todavía no tiene sesión asignada.
+/// Nunca colisiona con un id real de `SessionManager`, que empieza en 0.
+pub const PENDING_SESSION: usize = usize::MAX;
+
 /// Iconos Nerd Font (Symbols Nerd Font Mono) para los programas reconocidos.
 const ICON_PI: char = '\u{f03ff}'; // md-pi
 const ICON_GEMINI: char = '\u{f0a81}'; // md-zodiac_gemini
@@ -235,7 +239,7 @@ impl HerdrPlugin {
             tabs: vec![HerdrTab {
                 id: next_tab,
                 title: "terminal".to_string(),
-                session_id: 0, // Se actualizará en on_session_created
+                session_id: PENDING_SESSION, // on_session_created lo reemplaza
                 app: None,
             }],
             active_tab_index: 0,
@@ -256,7 +260,7 @@ impl HerdrPlugin {
             space.tabs.push(HerdrTab {
                 id: tab_id,
                 title: format!("term {}", space.tabs.len() + 1),
-                session_id: 0, // Se actualizará en on_session_created
+                session_id: PENDING_SESSION, // on_session_created lo reemplaza
                 app: None,
             });
             space.active_tab_index = space.tabs.len() - 1;
@@ -398,7 +402,9 @@ impl SpaceHook for HerdrPlugin {
         let mut s = self.state.write().unwrap();
         for space in s.spaces.iter_mut() {
             for tab in space.tabs.iter_mut() {
-                if tab.session_id == session_id {
+                // Una pestaña sin sesión asignada no puede recibir datos: si se
+                // aceptara, heredaría la app de otra pestaña por colisión de id.
+                if tab.session_id == session_id && tab.session_id != PENDING_SESSION {
                     tab.app = app.cloned();
                 }
             }
@@ -413,25 +419,32 @@ impl SpaceHook for HerdrPlugin {
     fn update_session_cwd(&self, session_id: usize, cwd: &Path, folder_name: &str) {
         let mut s = self.state.write().unwrap();
         for space in s.spaces.iter_mut() {
-            let contains_session = space.tabs.iter().any(|t| t.session_id == session_id);
-            if contains_session {
-                // Actualiza el nombre del espacio con la carpeta actual
-                if !folder_name.is_empty() {
-                    space.name = folder_name.to_string();
-                }
-                // Si la pestaña tiene nombre por defecto, se actualiza también con la carpeta
-                for tab in space.tabs.iter_mut() {
-                    if tab.session_id == session_id && (tab.title == "terminal" || tab.title.starts_with("term ")) {
-                        tab.title = folder_name.to_string();
-                    }
-                }                // Detecta automáticamente la rama git si la carpeta está en un repositorio
-                if let Some(branch) = detect_git_branch(cwd) {
-                    space.branch = branch;
-                } else {
-                    space.branch = "local".to_string();
-                }
-                break;
+            // Solo el espacio propietario de la sesión se renombra.
+            let contains_session = space
+                .tabs
+                .iter()
+                .any(|t| t.session_id == session_id && t.session_id != PENDING_SESSION);
+            if !contains_session {
+                continue;
             }
+
+            if !folder_name.is_empty() {
+                space.name = folder_name.to_string();
+            }
+
+            // Si la pestaña tiene nombre por defecto, se actualiza con la carpeta.
+            for tab in space.tabs.iter_mut() {
+                if tab.session_id == session_id
+                    && tab.session_id != PENDING_SESSION
+                    && (tab.title == "terminal" || tab.title.starts_with("term "))
+                {
+                    tab.title = folder_name.to_string();
+                }
+            }
+
+            // Detecta automáticamente la rama git si la carpeta está en un repositorio.
+            space.branch = detect_git_branch(cwd).unwrap_or_else(|| "local".to_string());
+            break;
         }
     }
 }
@@ -1075,6 +1088,31 @@ mod tests {
             assert_eq!(got_icon, icon, "icono incorrecto para {bin}");
             assert_eq!(got_label, label, "nombre incorrecto para {bin}");
         }
+    }
+
+    #[test]
+    fn a_new_tab_never_inherits_the_app_of_another_session() {
+        let plugin = HerdrPlugin::default();
+
+        // La primera pestaña corresponde a la sesión 0 real.
+        let pi = RunningApp { pid: 1, bin: "pi".to_string() };
+        plugin.update_session_app(0, Some(&pi));
+
+        // Se abre una pestaña nueva: nace sin sesión asignada.
+        let ctrl_shift_t = Key::new("t").ctrl().shift();
+        plugin.on_key(&ctrl_shift_t);
+        plugin.on_session_created(1);
+
+        // La sesión 0 sigue siendo pi, pero la pestaña nueva no puede heredarlo.
+        plugin.update_session_app(1, None);
+
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs[0].app, Some(pi));
+        assert_eq!(
+            s.spaces[0].tabs[1].app, None,
+            "una pestaña nueva no debe mostrar la app de otra sesión"
+        );
+        assert_eq!(s.spaces[0].tabs[1].session_id, 1);
     }
 
     #[test]
