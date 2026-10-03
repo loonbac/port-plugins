@@ -1,10 +1,11 @@
 //! Herdr Customization Plugin para PORT.
 //!
 //! Transforma PORT en el entorno visual y de flujo de trabajo de Herdr:
-//! - Barra lateral izquierda con lista interactiva de Espacios (Spaces) y panel de Agentes.
-//! - Barra superior de pestañas encapsuladas (Tabs) con selector y botón de nueva pestaña (+).
-//! - Estética cromática idéntica a Herdr (#0e0e16 terminal, #13131e sidebar y acentos violeta #231536).
-//! - Configurable y sincronizado en tiempo real a través de `~/.config/port/config.md`.
+//! - Inicio limpio: al abrir la terminal es 100 % terminal sin barras invasivas.
+//! - Con `Ctrl + Alt + T` se crea un nuevo Espacio (Space) y aparece la barra lateral izquierda.
+//! - Barra lateral y superior completamente transparentes, compartiendo la opacidad de la terminal.
+//! - Color de acento sincronizado en tiempo real con el wallpaper de NixOS (`~/.config/mpvpaper/accent.txt`).
+//! - Configurable y sincronizado a través de `~/.config/port/config.md`.
 
 use std::sync::{Arc, RwLock};
 
@@ -13,17 +14,55 @@ use gpui::{
     div, px, rgb, AnyElement, FontWeight, IntoElement, MouseButton, ParentElement, Styled, Window,
 };
 use port_plugin_api::{
-    AppearanceHook, InputHook, KeyAction, LayoutHook, Plugin, PluginConfig,
+    AppearanceHook, ConfigFile, InputHook, KeyAction, LayoutHook, Plugin, PluginConfig,
 };
 use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
+
+/// Obtiene el color de acento del wallpaper activo en NixOS (`~/.config/mpvpaper/accent.txt`).
+pub fn system_accent_color() -> Rgb {
+    if let Ok(home) = std::env::var("HOME") {
+        let path = std::path::Path::new(&home).join(".config/mpvpaper/accent.txt");
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if let Some(rgb) = parse_hex_color(content.trim()) {
+                return rgb;
+            }
+        }
+    }
+    // Color de acento por defecto de NixOS (#325573)
+    Rgb::new(0x32, 0x55, 0x73)
+}
+
+/// Parsea una cadena hexadecimal en formato `#RRGGBB` o `RRGGBB`.
+pub fn parse_hex_color(hex: &str) -> Option<Rgb> {
+    let clean = hex.strip_prefix('#').unwrap_or(hex).trim();
+    if clean.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+    Some(Rgb::new(r, g, b))
+}
+
+fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
+    let packed =
+        ((rgb_val.r as u32) << 16) | ((rgb_val.g as u32) << 8) | (rgb_val.b as u32);
+    rgb(packed).into()
+}
+
+fn hsla_color(r: u8, g: u8, b: u8, a: f32) -> gpui::Hsla {
+    let mut h: gpui::Hsla = rgb(((r as u32) << 16) | ((g as u32) << 8) | (b as u32)).into();
+    h.a = a;
+    h
+}
 
 /// Definición de un espacio de trabajo en Herdr.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrSpace {
     pub name: String,
     pub branch: String,
-    pub color: Rgb,
+    pub custom_color: Option<Rgb>,
 }
 
 /// Definición de una pestaña de terminal en Herdr.
@@ -42,38 +81,40 @@ pub struct HerdrState {
     pub active_tab_index: usize,
     pub tabs: Vec<HerdrTab>,
     pub opacity: f32,
+    pub accent_mode: String,
     next_tab_id: usize,
+    next_space_num: usize,
+}
+
+impl HerdrState {
+    /// Resuelve el color de acento actual (leyendo el wallpaper si está en modo "auto").
+    pub fn effective_accent(&self) -> Rgb {
+        if self.accent_mode.to_lowercase() == "auto" {
+            system_accent_color()
+        } else if let Some(rgb) = parse_hex_color(&self.accent_mode) {
+            rgb
+        } else {
+            system_accent_color()
+        }
+    }
 }
 
 impl Default for HerdrState {
     fn default() -> Self {
         Self {
-            sidebar_open: true,
+            // Inicialmente cerrado y sin spaces por defecto: la terminal abre pura y limpia
+            sidebar_open: false,
             active_space_index: 0,
-            spaces: vec![
-                HerdrSpace {
-                    name: "herdr".to_string(),
-                    branch: "master".to_string(),
-                    color: Rgb::new(0xa3, 0x71, 0xf7), // Púrpura
-                },
-                HerdrSpace {
-                    name: "web-dashboard".to_string(),
-                    branch: "feature/new-charts".to_string(),
-                    color: Rgb::new(0x58, 0xa6, 0xff), // Azul
-                },
-                HerdrSpace {
-                    name: "data-pipeline".to_string(),
-                    branch: "fix/kafka-event-v2".to_string(),
-                    color: Rgb::new(0x3f, 0xb9, 0x50), // Verde
-                },
-            ],
+            spaces: Vec::new(),
             active_tab_index: 0,
             tabs: vec![HerdrTab {
                 id: 1,
                 title: "terminal".to_string(),
             }],
-            opacity: 0.90,
+            opacity: 0.85,
+            accent_mode: "auto".to_string(),
             next_tab_id: 2,
+            next_space_num: 1,
         }
     }
 }
@@ -91,10 +132,41 @@ impl HerdrPlugin {
         }
     }
 
+    /// Crea un nuevo espacio y abre de inmediato la barra lateral izquierda.
+    pub fn create_space_and_open_sidebar(&self) {
+        let mut s = self.state.write().unwrap();
+        let num = s.next_space_num;
+        s.next_space_num += 1;
+
+        let name = format!("space-{num}");
+        let branch = "main".to_string();
+
+        s.spaces.push(HerdrSpace {
+            name,
+            branch,
+            custom_color: None,
+        });
+
+        s.active_space_index = s.spaces.len() - 1;
+        s.sidebar_open = true;
+    }
+
     /// Alterna la visibilidad de la barra lateral de espacios.
     pub fn toggle_sidebar(&self) -> bool {
         let mut s = self.state.write().unwrap();
-        s.sidebar_open = !s.sidebar_open;
+        if s.spaces.is_empty() {
+            // Si no hay espacios creados aún, crear el primero y abrir
+            let num = s.next_space_num;
+            s.next_space_num += 1;
+            s.spaces.push(HerdrSpace {
+                name: format!("space-{num}"),
+                branch: "main".to_string(),
+                custom_color: None,
+            });
+            s.sidebar_open = true;
+        } else {
+            s.sidebar_open = !s.sidebar_open;
+        }
         s.sidebar_open
     }
 
@@ -141,6 +213,14 @@ impl HerdrPlugin {
             s.active_tab_index = index;
         }
     }
+
+    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
+    pub fn save_to_default_file(&self) -> std::io::Result<()> {
+        if let Some(config) = self.save_config() {
+            ConfigFile::save_plugin(&ConfigFile::default_path(), self.id(), &config)?;
+        }
+        Ok(())
+    }
 }
 
 impl Default for HerdrPlugin {
@@ -150,7 +230,7 @@ impl Default for HerdrPlugin {
 }
 
 impl AppearanceHook for HerdrPlugin {
-    /// Fondo oscuro violeta característico de Herdr (#0e0e16).
+    /// Fondo oscuro característico de Herdr (#0e0e16).
     fn background_tint(&self, _base: Rgb) -> Rgb {
         Rgb::new(14, 14, 22)
     }
@@ -162,7 +242,8 @@ impl AppearanceHook for HerdrPlugin {
 
 impl LayoutHook for HerdrPlugin {
     fn left_sidebar_width(&self) -> f32 {
-        if self.state.read().unwrap().sidebar_open {
+        let s = self.state.read().unwrap();
+        if s.sidebar_open && !s.spaces.is_empty() {
             236.0
         } else {
             0.0
@@ -170,33 +251,38 @@ impl LayoutHook for HerdrPlugin {
     }
 
     fn top_bar_height(&self) -> f32 {
-        38.0
+        let s = self.state.read().unwrap();
+        // Solo ocupa altura si hay pestañas múltiples o si el panel de spaces está abierto
+        if s.tabs.len() > 1 || (s.sidebar_open && !s.spaces.is_empty()) {
+            38.0
+        } else {
+            0.0
+        }
     }
 
     fn left_sidebar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
-        if !state.sidebar_open {
+        if !state.sidebar_open || state.spaces.is_empty() {
             return None;
         }
 
         let active_space_idx = state.active_space_index;
         let spaces = state.spaces.clone();
+        let opacity = state.opacity;
+        let accent = to_hsla(state.effective_accent());
         drop(state);
 
         let mut spaces_list = div().flex().flex_col().gap(px(4.0));
 
         for (i, space) in spaces.iter().enumerate() {
             let is_active = i == active_space_idx;
-            let dot_color = rgb(
-                (space.color.r as u32) << 16
-                    | (space.color.g as u32) << 8
-                    | (space.color.b as u32),
-            );
+            let dot_color = space.custom_color.map(to_hsla).unwrap_or(accent);
 
+            // Fondo y borde del espacio: transparente con tinte del acento si está activo
             let (card_bg, card_border) = if is_active {
-                (rgb(0x1e1e2d), rgb(0x3a2254)) // Cápsula activa resaltada
+                (accent.opacity(0.20), accent.opacity(0.55))
             } else {
-                (rgb(0x13131e), rgb(0x13131e))
+                (hsla_color(0, 0, 0, 0.0), hsla_color(0, 0, 0, 0.0))
             };
 
             let state_for_click = Arc::clone(&self.state);
@@ -223,7 +309,6 @@ impl LayoutHook for HerdrPlugin {
                         .items_center()
                         .gap(px(10.0))
                         .child(
-                            // Punto de color distintivo del espacio
                             div()
                                 .w(px(8.0))
                                 .h(px(8.0))
@@ -248,7 +333,11 @@ impl LayoutHook for HerdrPlugin {
                                 .child(
                                     div()
                                         .text_size(px(11.0))
-                                        .text_color(rgb(0x8b949e))
+                                        .text_color(if is_active {
+                                            accent
+                                        } else {
+                                            rgb(0x8b949e).into()
+                                        })
                                         .child(space.branch.clone()),
                                 ),
                         ),
@@ -257,12 +346,13 @@ impl LayoutHook for HerdrPlugin {
             spaces_list = spaces_list.child(item);
         }
 
+        // Sidebar con fondo 100% transparente compartiendo la opacidad de la terminal
         let sidebar = div()
             .w(px(236.0))
             .h_full()
-            .bg(rgb(0x13131e))
+            .bg(hsla_color(17, 17, 26, opacity))
             .border_r(px(1.0))
-            .border_color(rgb(0x231536))
+            .border_color(accent.opacity(0.35))
             .p(px(12.0))
             .flex()
             .flex_col()
@@ -291,23 +381,25 @@ impl LayoutHook for HerdrPlugin {
                                     .px(px(6.0))
                                     .py(px(1.0))
                                     .rounded(px(4.0))
-                                    .bg(rgb(0x1e1e2d))
+                                    .bg(accent.opacity(0.20))
+                                    .border_1()
+                                    .border_color(accent.opacity(0.40))
                                     .text_size(px(10.0))
-                                    .text_color(rgb(0xa371f7))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(accent)
                                     .child(format!("{}", spaces.len())),
                             ),
                     )
                     .child(spaces_list),
             )
             .child(
-                // Sección inferior: AGENTS de Herdr
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(8.0))
                     .pt(px(12.0))
                     .border_t(px(1.0))
-                    .border_color(rgb(0x231536))
+                    .border_color(accent.opacity(0.25))
                     .child(
                         div()
                             .px(px(6.0))
@@ -325,9 +417,9 @@ impl LayoutHook for HerdrPlugin {
                             .px(px(10.0))
                             .py(px(6.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x181825))
+                            .bg(accent.opacity(0.12))
                             .border_1()
-                            .border_color(rgb(0x2a1a40))
+                            .border_color(accent.opacity(0.30))
                             .child(
                                 div()
                                     .flex()
@@ -339,7 +431,7 @@ impl LayoutHook for HerdrPlugin {
                                             .w(px(6.0))
                                             .h(px(6.0))
                                             .rounded(px(3.0))
-                                            .bg(rgb(0x3fb950)),
+                                            .bg(accent),
                                     )
                                     .child(
                                         div()
@@ -352,7 +444,7 @@ impl LayoutHook for HerdrPlugin {
                             .child(
                                 div()
                                     .text_size(px(11.0))
-                                    .text_color(rgb(0x8b949e))
+                                    .text_color(accent)
                                     .child("ready · idle"),
                             ),
                     ),
@@ -363,9 +455,16 @@ impl LayoutHook for HerdrPlugin {
 
     fn top_bar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
-        let sidebar_open = state.sidebar_open;
+        // Si no hay pestañas múltiples ni sidebar de spaces activo, la barra superior no se dibuja
+        if state.tabs.len() <= 1 && (!state.sidebar_open || state.spaces.is_empty()) {
+            return None;
+        }
+
+        let sidebar_open = state.sidebar_open && !state.spaces.is_empty();
         let active_tab_idx = state.active_tab_index;
         let tabs = state.tabs.clone();
+        let opacity = state.opacity;
+        let accent = to_hsla(state.effective_accent());
         drop(state);
 
         let state_for_toggle = Arc::clone(&self.state);
@@ -378,15 +477,15 @@ impl LayoutHook for HerdrPlugin {
             .py(px(4.0))
             .rounded(px(6.0))
             .bg(if sidebar_open {
-                rgb(0x1e1e2d)
+                accent.opacity(0.20)
             } else {
-                rgb(0x161622)
+                hsla_color(22, 22, 34, opacity)
             })
             .border_1()
             .border_color(if sidebar_open {
-                rgb(0x3a2254)
+                accent.opacity(0.50)
             } else {
-                rgb(0x25143a)
+                accent.opacity(0.25)
             })
             .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
                 let mut s = state_for_toggle.write().unwrap();
@@ -399,9 +498,9 @@ impl LayoutHook for HerdrPlugin {
                     .h(px(6.0))
                     .rounded(px(3.0))
                     .bg(if sidebar_open {
-                        rgb(0xa371f7)
+                        accent
                     } else {
-                        rgb(0x6e7681)
+                        rgb(0x6e7681).into()
                     }),
             )
             .child(
@@ -409,9 +508,9 @@ impl LayoutHook for HerdrPlugin {
                     .text_size(px(11.0))
                     .font_weight(FontWeight::BOLD)
                     .text_color(if sidebar_open {
-                        rgb(0xd2a8ff)
+                        accent
                     } else {
-                        rgb(0x8b949e)
+                        rgb(0x8b949e).into()
                     })
                     .child("spaces"),
             );
@@ -421,9 +520,9 @@ impl LayoutHook for HerdrPlugin {
         for (i, tab) in tabs.iter().enumerate() {
             let is_active = i == active_tab_idx;
             let (bg_col, border_col) = if is_active {
-                (rgb(0x181825), rgb(0x3a2254))
+                (accent.opacity(0.22), accent.opacity(0.55))
             } else {
-                (rgb(0x12121d), rgb(0x1c1c2b))
+                (hsla_color(18, 18, 29, opacity), accent.opacity(0.20))
             };
 
             let state_for_click = Arc::clone(&self.state);
@@ -448,9 +547,9 @@ impl LayoutHook for HerdrPlugin {
                     div()
                         .text_size(px(12.0))
                         .text_color(if is_active {
-                            rgb(0xa371f7)
+                            accent
                         } else {
-                            rgb(0x6e7681)
+                            rgb(0x6e7681).into()
                         })
                         .child(">"),
                 )
@@ -476,7 +575,8 @@ impl LayoutHook for HerdrPlugin {
                         .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
                             let mut s = state_for_close.write().unwrap();
                             if s.tabs.len() > 1 && i < s.tabs.len() {
-                                s.tabs.remove(i);
+                                let active_idx = s.active_tab_index;
+                                s.tabs.remove(active_idx);
                                 if s.active_tab_index >= s.tabs.len() {
                                     s.active_tab_index = s.tabs.len() - 1;
                                 }
@@ -497,9 +597,9 @@ impl LayoutHook for HerdrPlugin {
             .w(px(24.0))
             .h(px(24.0))
             .rounded(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(accent.opacity(0.15))
             .border_1()
-            .border_color(rgb(0x2a1a40))
+            .border_color(accent.opacity(0.35))
             .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
                 let mut s = state_for_new.write().unwrap();
                 let next_id = s.next_tab_id;
@@ -514,7 +614,7 @@ impl LayoutHook for HerdrPlugin {
             .child(
                 div()
                     .text_size(px(13.0))
-                    .text_color(rgb(0x8b949e))
+                    .text_color(accent)
                     .child("+"),
             );
 
@@ -523,9 +623,9 @@ impl LayoutHook for HerdrPlugin {
         let top_bar = div()
             .h(px(38.0))
             .w_full()
-            .bg(rgb(0x13131e))
+            .bg(hsla_color(17, 17, 26, opacity))
             .border_b(px(1.0))
-            .border_color(rgb(0x231536))
+            .border_color(accent.opacity(0.30))
             .px(px(10.0))
             .flex()
             .flex_row()
@@ -540,13 +640,19 @@ impl LayoutHook for HerdrPlugin {
 
 impl InputHook for HerdrPlugin {
     fn on_key(&self, key: &Key) -> KeyAction {
-        // Ctrl+Shift+S: alternar barra lateral de espacios
-        if key.ctrl && key.shift && key.key.to_lowercase() == "s" {
+        // Ctrl + Alt + T: crear un nuevo espacio y abrir de inmediato la barra lateral
+        if key.ctrl && key.alt && !key.shift && key.key.to_lowercase() == "t" {
+            self.create_space_and_open_sidebar();
+            return KeyAction::Consume;
+        }
+
+        // Ctrl + Shift + S: alternar visibilidad de la barra lateral de espacios
+        if key.ctrl && key.shift && !key.alt && key.key.to_lowercase() == "s" {
             self.toggle_sidebar();
             return KeyAction::Consume;
         }
 
-        // Ctrl+T: nueva pestaña
+        // Ctrl + T: nueva pestaña
         if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "t" {
             let next_id = {
                 let s = self.state.read().unwrap();
@@ -556,7 +662,7 @@ impl InputHook for HerdrPlugin {
             return KeyAction::Consume;
         }
 
-        // Ctrl+W: cerrar pestaña
+        // Ctrl + W: cerrar pestaña
         if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "w" {
             if self.close_active_tab() {
                 return KeyAction::Consume;
@@ -604,13 +710,11 @@ impl Plugin for HerdrPlugin {
 
     fn default_config(&self) -> Option<PluginConfig> {
         let mut cfg = PluginConfig::new();
-        cfg.set("sidebar_open", true);
-        cfg.set("active_space", "herdr");
-        cfg.set("opacity", 0.90);
-        cfg.set(
-            "spaces",
-            "herdr:master,web-dashboard:feature/new-charts,data-pipeline:fix/kafka-event-v2",
-        );
+        // Por defecto cerrado y sin espacios iniciales fijos
+        cfg.set("sidebar_open", false);
+        cfg.set("opacity", 0.85);
+        cfg.set("accent", "auto");
+        cfg.set("spaces", "");
         Some(cfg)
     }
 
@@ -622,26 +726,23 @@ impl Plugin for HerdrPlugin {
         if let Some(op) = config.get_f32("opacity") {
             s.opacity = op;
         }
+        if let Some(acc) = config.get("accent") {
+            s.accent_mode = acc.to_string();
+        }
         if let Some(spaces_str) = config.get("spaces") {
             let mut parsed_spaces = Vec::new();
-            let colors = [
-                Rgb::new(0xa3, 0x71, 0xf7),
-                Rgb::new(0x58, 0xa6, 0xff),
-                Rgb::new(0x3f, 0xb9, 0x50),
-                Rgb::new(0xd2, 0x99, 0x22),
-            ];
-            for (idx, entry) in spaces_str.split(',').enumerate() {
+            for entry in spaces_str.split(',') {
                 if let Some((name, branch)) = entry.trim().split_once(':') {
-                    parsed_spaces.push(HerdrSpace {
-                        name: name.trim().to_string(),
-                        branch: branch.trim().to_string(),
-                        color: colors[idx % colors.len()],
-                    });
+                    if !name.trim().is_empty() {
+                        parsed_spaces.push(HerdrSpace {
+                            name: name.trim().to_string(),
+                            branch: branch.trim().to_string(),
+                            custom_color: None,
+                        });
+                    }
                 }
             }
-            if !parsed_spaces.is_empty() {
-                s.spaces = parsed_spaces;
-            }
+            s.spaces = parsed_spaces;
         }
     }
 
@@ -650,6 +751,7 @@ impl Plugin for HerdrPlugin {
         let mut cfg = PluginConfig::new();
         cfg.set("sidebar_open", s.sidebar_open);
         cfg.set("opacity", s.opacity);
+        cfg.set("accent", s.accent_mode.clone());
         let spaces_str = s
             .spaces
             .iter()
@@ -666,26 +768,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn herdr_defaults() {
-        let plugin = HerdrPlugin::default();
-        assert_eq!(plugin.id(), "herdr");
-        assert_eq!(plugin.name(), "Herdr Customization Plugin");
-        assert_eq!(plugin.left_sidebar_width(), 236.0);
-        assert_eq!(plugin.top_bar_height(), 38.0);
-        assert!(plugin.left_sidebar().is_some());
-        assert!(plugin.top_bar().is_some());
+    fn parse_hex_color_valid() {
+        assert_eq!(
+            parse_hex_color("#325573"),
+            Some(Rgb::new(0x32, 0x55, 0x73))
+        );
+        assert_eq!(
+            parse_hex_color("325573"),
+            Some(Rgb::new(0x32, 0x55, 0x73))
+        );
+        assert_eq!(parse_hex_color("invalid"), None);
     }
 
     #[test]
-    fn herdr_toggle_sidebar() {
+    fn herdr_opens_clean_terminal_by_default() {
         let plugin = HerdrPlugin::default();
-        assert!(plugin.toggle_sidebar() == false);
+        assert_eq!(plugin.id(), "herdr");
+        assert_eq!(plugin.name(), "Herdr Customization Plugin");
+        // Al abrir la terminal por defecto es limpia: sin sidebar ni topbar
         assert_eq!(plugin.left_sidebar_width(), 0.0);
+        assert_eq!(plugin.top_bar_height(), 0.0);
         assert!(plugin.left_sidebar().is_none());
+        assert!(plugin.top_bar().is_none());
+        assert_eq!(plugin.opacity(), Some(0.85));
+    }
 
-        assert!(plugin.toggle_sidebar() == true);
+    #[test]
+    fn ctrl_alt_t_creates_space_and_opens_sidebar() {
+        let plugin = HerdrPlugin::default();
+        assert_eq!(plugin.left_sidebar_width(), 0.0);
+
+        // Pulsamos Ctrl+Alt+T
+        let ctrl_alt_t = Key::new("t").ctrl().alt();
+        assert_eq!(plugin.on_key(&ctrl_alt_t), KeyAction::Consume);
+
+        // Ahora el sidebar está abierto y tiene ancho 236px
         assert_eq!(plugin.left_sidebar_width(), 236.0);
         assert!(plugin.left_sidebar().is_some());
+        assert_eq!(plugin.top_bar_height(), 38.0);
+        assert!(plugin.top_bar().is_some());
+
+        // El primer espacio creado se llama space-1
+        assert_eq!(plugin.state.read().unwrap().spaces.len(), 1);
+        assert_eq!(plugin.state.read().unwrap().spaces[0].name, "space-1");
     }
 
     #[test]
@@ -699,17 +824,9 @@ mod tests {
     }
 
     #[test]
-    fn herdr_input_hook_shortcuts() {
+    fn herdr_accent_reads_system_color() {
         let plugin = HerdrPlugin::default();
-
-        // Ctrl+Shift+S alterna sidebar
-        let toggle = Key::new("s").ctrl().shift();
-        assert_eq!(plugin.on_key(&toggle), KeyAction::Consume);
-        assert_eq!(plugin.left_sidebar_width(), 0.0);
-
-        // Alt+2 cambia al espacio 2
-        let alt_2 = Key::new("2").alt();
-        assert_eq!(plugin.on_key(&alt_2), KeyAction::Consume);
-        assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
+        let accent = plugin.state.read().unwrap().effective_accent();
+        assert_eq!(accent, system_accent_color());
     }
 }
