@@ -1,0 +1,9 @@
+[package]
+name = "port-plugin-transparency"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PORT Plugin: Transparencia y opacidad de ventana"
+
+[dependencies]
+port-plugin-api = { workspace = true }

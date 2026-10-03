@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "plugins/transparency",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+gpui = "=0.2.2"
+port-term-core = { git = "https://github.com/loonbac/port.git" }
+port-plugin-api = { git = "https://github.com/loonbac/port.git" }
+
+[patch."https://github.com/loonbac/port.git"]
+port-term-core = { path = "../port/crates/term-core" }
+port-plugin-api = { path = "../port/crates/plugin-api" }
