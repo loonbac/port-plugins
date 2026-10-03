@@ -3872,6 +3872,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-plugin-font-zoom"
+version = "0.1.0"
+dependencies = [
+ "port-plugin-api",
+ "port-term-core",
+]
+
+[[package]]
+name = "port-plugin-shortcuts"
+version = "0.1.0"
+dependencies = [
+ "port-plugin-api",
+ "port-term-core",
+]
+
+[[package]]
 name = "port-plugin-transparency"
 version = "0.1.0"
 dependencies = [

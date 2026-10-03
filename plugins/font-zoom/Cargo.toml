@@ -1,0 +1,10 @@
+[package]
+name = "port-plugin-font-zoom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PORT Plugin: Zoom interactivo de fuente con atajos (Ctrl++, Ctrl+-, Ctrl+0)"
+
+[dependencies]
+port-plugin-api = { workspace = true }
+port-term-core = { workspace = true }

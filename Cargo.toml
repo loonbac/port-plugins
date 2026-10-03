@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "plugins/transparency",
     "plugins/font",
+    "plugins/font-zoom",
+    "plugins/shortcuts",
 ]
 
 [workspace.package]

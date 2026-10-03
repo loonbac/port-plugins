@@ -1,0 +1,10 @@
+[package]
+name = "port-plugin-shortcuts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PORT Plugin: Gestor y creador de atajos de teclado personalizados"
+
+[dependencies]
+port-plugin-api = { workspace = true }
+port-term-core = { workspace = true }
