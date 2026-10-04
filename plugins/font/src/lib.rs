@@ -108,7 +108,10 @@ mod tests {
     #[test]
     fn font_plugin_defaults() {
         let plugin = FontPlugin::new("FiraCode Nerd Font Mono");
-        assert_eq!(plugin.font_family(), Some("FiraCode Nerd Font Mono".to_string()));
+        assert_eq!(
+            plugin.font_family(),
+            Some("FiraCode Nerd Font Mono".to_string())
+        );
         assert_eq!(plugin.font_size(), None);
         assert_eq!(plugin.font_fallbacks(), None);
     }

@@ -50,8 +50,7 @@ pub fn parse_hex_color(hex: &str) -> Option<Rgb> {
 }
 
 fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
-    let packed =
-        ((rgb_val.r as u32) << 16) | ((rgb_val.g as u32) << 8) | (rgb_val.b as u32);
+    let packed = ((rgb_val.r as u32) << 16) | ((rgb_val.g as u32) << 8) | (rgb_val.b as u32);
     rgb(packed).into()
 }
 
@@ -128,10 +127,7 @@ fn app_identity(app: &RunningApp) -> (char, String) {
     }
 
     // Cualquier otro agente o programa desconocido: robot + nombre capitalizado.
-    (
-        ICON_ROBOT,
-        humanize(bin),
-    )
+    (ICON_ROBOT, humanize(bin))
 }
 
 /// Ancho por defecto de la barra lateral de espacios, en píxeles lógicos.
@@ -633,24 +629,21 @@ impl LayoutHook for HerdrPlugin {
                 .bg(card_bg)
                 .border_1()
                 .border_color(card_border)
-                .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
-                    let mut s = state_for_click.write().unwrap();
-                    s.active_space_index = i;
-                    window.refresh();
-                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |_event, window: &mut Window, _cx| {
+                        let mut s = state_for_click.write().unwrap();
+                        s.active_space_index = i;
+                        window.refresh();
+                    },
+                )
                 .child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
                         .gap(px(10.0))
-                        .child(
-                            div()
-                                .w(px(8.0))
-                                .h(px(8.0))
-                                .rounded(px(4.0))
-                                .bg(dot_color),
-                        )
+                        .child(div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(dot_color))
                         .child(
                             div()
                                 .flex()
@@ -790,19 +783,18 @@ impl LayoutHook for HerdrPlugin {
                 .cursor_col_resize()
                 .on_mouse_move(move |event, window, _cx| {
                     let x: f32 = event.position.x.into();
-                    if {
-                        let mut s = state_for_move.write().unwrap();
-                        match s.resize_anchor_x {
-                            Some(anchor) => {
-                                s.sidebar_width = (s.resize_start_width + (x - anchor))
-                                    .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
-                                true
-                            }
-                            None => false,
-                        }
-                    } {
-                        window.refresh();
-                    }
+                    let mut s = state_for_move.write().unwrap();
+                    // `resize_anchor_x` es None cuando el puntero no esta
+                    // arrastrando la barra. Se comprueba antes de escribir
+                    // para no ensuciar el estado con un movimiento suelto.
+                    let anchor = match s.resize_anchor_x {
+                        Some(anchor) => anchor,
+                        None => return,
+                    };
+                    s.sidebar_width = (s.resize_start_width + (x - anchor))
+                        .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+                    drop(s);
+                    window.refresh();
                 })
                 .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
                     state_for_end.write().unwrap().resize_anchor_x = None;
@@ -859,14 +851,17 @@ impl LayoutHook for HerdrPlugin {
                 .bg(bg_col)
                 .border_1()
                 .border_color(border_col)
-                .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
-                    let mut s = state_for_click.write().unwrap();
-                    let space_idx = s.active_space_index;
-                    if let Some(sp) = s.spaces.get_mut(space_idx) {
-                        sp.active_tab_index = i;
-                    }
-                    window.refresh();
-                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |_event, window: &mut Window, _cx| {
+                        let mut s = state_for_click.write().unwrap();
+                        let space_idx = s.active_space_index;
+                        if let Some(sp) = s.spaces.get_mut(space_idx) {
+                            sp.active_tab_index = i;
+                        }
+                        window.refresh();
+                    },
+                )
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -927,24 +922,27 @@ impl LayoutHook for HerdrPlugin {
                     div()
                         .text_size(px(11.0))
                         .text_color(rgb(0x6e7681))
-                        .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
-                            let mut s = state_for_close.write().unwrap();
-                            let space_idx = s.active_space_index;
-                            let mut closed_session = None;
-                            if let Some(sp) = s.spaces.get_mut(space_idx) {
-                                if sp.tabs.len() > 1 && i < sp.tabs.len() {
-                                    let removed = sp.tabs.remove(i);
-                                    closed_session = Some(removed.session_id);
-                                    if sp.active_tab_index >= sp.tabs.len() {
-                                        sp.active_tab_index = sp.tabs.len() - 1;
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_event, window: &mut Window, _cx| {
+                                let mut s = state_for_close.write().unwrap();
+                                let space_idx = s.active_space_index;
+                                let mut closed_session = None;
+                                if let Some(sp) = s.spaces.get_mut(space_idx) {
+                                    if sp.tabs.len() > 1 && i < sp.tabs.len() {
+                                        let removed = sp.tabs.remove(i);
+                                        closed_session = Some(removed.session_id);
+                                        if sp.active_tab_index >= sp.tabs.len() {
+                                            sp.active_tab_index = sp.tabs.len() - 1;
+                                        }
                                     }
                                 }
-                            }
-                            if let Some(sess_id) = closed_session {
-                                s.close_session_requested = Some(sess_id);
-                                window.refresh();
-                            }
-                        })
+                                if let Some(sess_id) = closed_session {
+                                    s.close_session_requested = Some(sess_id);
+                                    window.refresh();
+                                }
+                            },
+                        )
                         .child("×"),
                 );
 
@@ -962,29 +960,27 @@ impl LayoutHook for HerdrPlugin {
             .bg(accent.opacity(0.15))
             .border_1()
             .border_color(accent.opacity(0.35))
-            .on_mouse_down(MouseButton::Left, move |_event, window: &mut Window, _cx| {
-                let mut s = state_for_new.write().unwrap();
-                let next_id = s.next_tab_id;
-                s.next_tab_id += 1;
-                let space_idx = s.active_space_index;
-                if let Some(sp) = s.spaces.get_mut(space_idx) {
-                    sp.tabs.push(HerdrTab {
-                        id: next_id,
-                        title: format!("term {}", sp.tabs.len() + 1),
-                        session_id: 0,
-                        app: None,
-                    });
-                    sp.active_tab_index = sp.tabs.len() - 1;
-                    s.new_session_requested = true;
-                }
-                window.refresh();
-            })
-            .child(
-                div()
-                    .text_size(px(13.0))
-                    .text_color(accent)
-                    .child("+"),
-            );
+            .on_mouse_down(
+                MouseButton::Left,
+                move |_event, window: &mut Window, _cx| {
+                    let mut s = state_for_new.write().unwrap();
+                    let next_id = s.next_tab_id;
+                    s.next_tab_id += 1;
+                    let space_idx = s.active_space_index;
+                    if let Some(sp) = s.spaces.get_mut(space_idx) {
+                        sp.tabs.push(HerdrTab {
+                            id: next_id,
+                            title: format!("term {}", sp.tabs.len() + 1),
+                            session_id: 0,
+                            app: None,
+                        });
+                        sp.active_tab_index = sp.tabs.len() - 1;
+                        s.new_session_requested = true;
+                    }
+                    window.refresh();
+                },
+            )
+            .child(div().text_size(px(13.0)).text_color(accent).child("+"));
 
         tabs_row = tabs_row.child(add_tab_btn);
 
@@ -1013,17 +1009,23 @@ impl InputHook for HerdrPlugin {
         }
 
         // Alt + Flecha Izquierda: cambiar a la pestaña anterior dentro del espacio actual
-        if key.alt && !key.ctrl && !key.shift && (key.key == "Left" || key.key == "left") {
-            if self.select_previous_tab() {
-                return KeyAction::Consume;
-            }
+        if key.alt
+            && !key.ctrl
+            && !key.shift
+            && (key.key == "Left" || key.key == "left")
+            && self.select_previous_tab()
+        {
+            return KeyAction::Consume;
         }
 
         // Alt + Flecha Derecha: cambiar a la pestaña siguiente dentro del espacio actual
-        if key.alt && !key.ctrl && !key.shift && (key.key == "Right" || key.key == "right") {
-            if self.select_next_tab() {
-                return KeyAction::Consume;
-            }
+        if key.alt
+            && !key.ctrl
+            && !key.shift
+            && (key.key == "Right" || key.key == "right")
+            && self.select_next_tab()
+        {
+            return KeyAction::Consume;
         }
 
         // Ctrl + Alt + T: crear un nuevo espacio aparte del actual
@@ -1033,10 +1035,13 @@ impl InputHook for HerdrPlugin {
         }
 
         // Ctrl + W: cerrar pestaña activa en el espacio actual
-        if key.ctrl && !key.alt && !key.shift && key.key.to_lowercase() == "w" {
-            if self.close_active_tab() {
-                return KeyAction::Consume;
-            }
+        if key.ctrl
+            && !key.alt
+            && !key.shift
+            && key.key.to_lowercase() == "w"
+            && self.close_active_tab()
+        {
+            return KeyAction::Consume;
         }
 
         // Alt + 1..9: cambiar rápidamente de espacio
@@ -1152,14 +1157,8 @@ mod tests {
 
     #[test]
     fn parse_hex_color_valid() {
-        assert_eq!(
-            parse_hex_color("#325573"),
-            Some(Rgb::new(0x32, 0x55, 0x73))
-        );
-        assert_eq!(
-            parse_hex_color("325573"),
-            Some(Rgb::new(0x32, 0x55, 0x73))
-        );
+        assert_eq!(parse_hex_color("#325573"), Some(Rgb::new(0x32, 0x55, 0x73)));
+        assert_eq!(parse_hex_color("325573"), Some(Rgb::new(0x32, 0x55, 0x73)));
         assert_eq!(parse_hex_color("invalid"), None);
     }
 
@@ -1189,7 +1188,7 @@ mod tests {
         // Ahora hay 2 tabs en el espacio activo y el top bar aparece
         assert_eq!(plugin.top_bar_height(), 38.0);
         assert!(plugin.top_bar().is_some());
-        assert_eq!(plugin.take_new_session_request(), true);
+        assert!(plugin.take_new_session_request());
 
         // Simulamos que el core asigna session_id = 1
         plugin.on_session_created(1);
@@ -1230,7 +1229,7 @@ mod tests {
         assert_eq!(spaces[0].name, "space-1");
         assert_eq!(spaces[1].name, "space-2");
         assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
-        assert_eq!(plugin.take_new_session_request(), true);
+        assert!(plugin.take_new_session_request());
     }
 
     #[test]
@@ -1262,7 +1261,10 @@ mod tests {
             ("gemini", ICON_GEMINI, "Gemini CLI"),
         ];
         for (bin, icon, label) in cases {
-            let app = RunningApp { pid: 1, bin: bin.to_string() };
+            let app = RunningApp {
+                pid: 1,
+                bin: bin.to_string(),
+            };
             let (got_icon, got_label) = app_identity(&app);
             assert_eq!(got_icon, icon, "icono incorrecto para {bin}");
             assert_eq!(got_label, label, "nombre incorrecto para {bin}");
@@ -1274,7 +1276,10 @@ mod tests {
         let plugin = HerdrPlugin::default();
 
         // La primera pestaña corresponde a la sesión 0 real.
-        let pi = RunningApp { pid: 1, bin: "pi".to_string() };
+        let pi = RunningApp {
+            pid: 1,
+            bin: "pi".to_string(),
+        };
         plugin.update_session_app(0, Some(&pi));
 
         // Se abre una pestaña nueva: nace sin sesión asignada.
@@ -1339,7 +1344,10 @@ mod tests {
 
         plugin.end_resize();
         assert!(!plugin.is_resizing());
-        assert!(!plugin.update_resize(500.0), "sin arrastre activo no debe cambiar");
+        assert!(
+            !plugin.update_resize(500.0),
+            "sin arrastre activo no debe cambiar"
+        );
         assert_eq!(plugin.sidebar_width(), 236.0);
     }
 
@@ -1398,7 +1406,10 @@ mod tests {
 
     #[test]
     fn unknown_agents_fall_back_to_robot_and_humanized_name() {
-        let app = RunningApp { pid: 1, bin: "miagente".to_string() };
+        let app = RunningApp {
+            pid: 1,
+            bin: "miagente".to_string(),
+        };
         let (icon, label) = app_identity(&app);
         assert_eq!(icon, ICON_ROBOT);
         assert_eq!(label, "Miagente");
@@ -1412,7 +1423,10 @@ mod tests {
         plugin.on_key(&ctrl_shift_t);
         plugin.on_session_created(1);
 
-        let app = RunningApp { pid: 42, bin: "pi".to_string() };
+        let app = RunningApp {
+            pid: 42,
+            bin: "pi".to_string(),
+        };
         plugin.update_session_app(1, Some(&app));
 
         let s = plugin.state.read().unwrap();

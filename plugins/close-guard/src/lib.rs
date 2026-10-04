@@ -144,7 +144,10 @@ mod tests {
     #[test]
     fn trivial_commands_do_not_block_closing() {
         for bin in ["true", "echo", "printf", "sleep"] {
-            assert!(!CloseGuardPlugin::should_block(bin), "{bin} no debe bloquear");
+            assert!(
+                !CloseGuardPlugin::should_block(bin),
+                "{bin} no debe bloquear"
+            );
         }
     }
 
