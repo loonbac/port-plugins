@@ -76,20 +76,6 @@ The bindings used by the shipped configuration are:
 | `Ctrl` `-` | Zoom out |
 | `Ctrl` `0` | Reset font size |
 
-### `menu-customizer`
-
-Patches the core plugin manager: its shortcut, its title, or the entire
-rendering of the panel.
-
-```rust
-use port_plugin_menu_customizer::MenuCustomizerPlugin;
-registry.register(
-    MenuCustomizerPlugin::default()
-        .with_shortcut("ctrl+shift+p")
-        .with_title("Extensions")
-        .with_custom_theme(true),
-);
-```
 
 ### `herdr`
 
@@ -137,7 +123,6 @@ Plugins implement one or more traits from `port-plugin-api`:
 | `InputHook` | Intercept and consume keys |
 | `LayoutHook` | Inject top bar, sidebar, status bar |
 | `SpaceHook` | Create, select and track sessions/tabs/spaces |
-| `PluginManagerHook` | Replace the plugin manager UI |
 | `LifecycleHook` | Veto the window close |
 
 Every plugin may also provide `default_config`, `load_config` and `save_config`

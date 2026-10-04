@@ -3861,7 +3861,11 @@ name = "port-plugin-api"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "port-plugin-sdk",
  "port-term-core",
+ "serde",
+ "serde_json",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -3897,11 +3901,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "port-plugin-menu-customizer"
+name = "port-plugin-sdk"
 version = "0.1.0"
 dependencies = [
- "gpui",
- "port-plugin-api",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

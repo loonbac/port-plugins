@@ -5,7 +5,6 @@ members = [
     "plugins/font",
     "plugins/font-zoom",
     "plugins/shortcuts",
-    "plugins/menu-customizer",
     "plugins/herdr",
     "plugins/close-guard",
 ]

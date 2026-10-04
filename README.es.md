@@ -80,20 +80,6 @@ Los bindings que usa la configuración instalada son:
 | `Ctrl` `-` | Reducir fuente |
 | `Ctrl` `0` | Reiniciar tamaño de fuente |
 
-### `menu-customizer`
-
-Parchea el gestor de plugins del núcleo: su atajo, su título o todo el
-renderizado del panel.
-
-```rust
-use port_plugin_menu_customizer::MenuCustomizerPlugin;
-registry.register(
-    MenuCustomizerPlugin::default()
-        .with_shortcut("ctrl+shift+p")
-        .with_title("Extensiones")
-        .with_custom_theme(true),
-);
-```
 
 ### `herdr`
 
@@ -142,7 +128,6 @@ Los plugins implementan uno o más traits de `port-plugin-api`:
 | `InputHook` | Interceptar y consumir teclas |
 | `LayoutHook` | Inyectar barra superior, lateral o de estado |
 | `SpaceHook` | Crear, seleccionar y seguir sesiones/pestañas/espacios |
-| `PluginManagerHook` | Reemplazar la UI del gestor de plugins |
 | `LifecycleHook` | Vetar el cierre de la ventana |
 
 Cada plugin puede además aportar `default_config`, `load_config` y `save_config`
