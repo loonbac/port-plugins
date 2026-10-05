@@ -298,6 +298,25 @@ impl AgentWatcher {
         self.entries().iter().filter(|e| e.status.is_live()).count()
     }
 
+    /// Vivos + los terminados en la ultima `window` segundos.
+    ///
+    /// Reciente no es "los mas nuevos de siempre": la carpeta trae cientos de
+    /// tareas de hace semanas y listarlas en una terminal recien abierta seria
+    /// puro ruido. Con ventana, el que acabo de terminar se ve mientras dura
+    /// su rastro, y lo de septiembre no estorba.
+    pub fn recent(&mut self, window_secs: u64) -> Vec<AgentEntry> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let cutoff = now.saturating_sub(window_secs * 1000);
+        self.entries()
+            .iter()
+            .filter(|e| e.status.is_live() || e.last_activity_at >= cutoff)
+            .cloned()
+            .collect()
+    }
+
     /// Los que se pintan: vivos primero, con tope.
     pub fn visible(&mut self, limit: usize) -> Vec<AgentEntry> {
         self.entries().iter().take(limit).cloned().collect()

@@ -9,7 +9,7 @@
 //! - Color de acento sincronizado en tiempo real con el wallpaper de NixOS (`~/.config/mpvpaper/accent.txt`).
 //! - Configurable y sincronizado a través de `~/.config/port/config.md`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use gpui::prelude::*;
@@ -59,13 +59,11 @@ pub fn parse_hex_color(hex: &str) -> Option<Rgb> {
 /// Se guarda en el plugin y no en el estado de la sidebar porque su trabajo es
 /// exactamente el del watcher de configuración: mantener el dato fresco sin
 /// que la UI tenga que pedirlo.
-fn agent_watcher() -> &'static std::sync::Mutex<agents::AgentWatcher> {
-    use std::sync::OnceLock;
-    static WATCHER: OnceLock<std::sync::Mutex<agents::AgentWatcher>> = OnceLock::new();
-    WATCHER.get_or_init(|| {
-        std::sync::Mutex::new(agents::AgentWatcher::new(agents::default_tasks_dir()))
-    })
-}
+/// Durante cuanto segundos despues de terminar un subagente sigue contando como
+/// reciente para decidir si la barra lateral se muestra.
+const RECENT_WINDOW_SECS: u64 = 600;
+
+type SharedAgents = Arc<std::sync::Mutex<agents::AgentWatcher>>;
 
 /// Comando que reabre un subagente de `pi` por su UUID.
 ///
@@ -78,22 +76,10 @@ fn agent_watcher() -> &'static std::sync::Mutex<agents::AgentWatcher> {
 ///
 /// Se lee del disco en vivo, igual que la lista de la sidebar.
 pub fn agent_resume_command(uuid: &str) -> Option<String> {
-    let guard = agent_watcher()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let sessions = agents::sessions_dir(&agents::default_tasks_dir());
-    // El lock se queda tomado mientras se compone el comando para no dejar que
-    // otro render mueva launderlyingCache a mitad.
-    let _ = &*guard;
-    Some(agents::resume_command(&sessions, uuid))
-}
-
-/// Subagentes de `pi` visibles ahora mismo, vivos primero.
-pub fn visible_agents(limit: usize) -> Vec<agents::AgentEntry> {
-    let mut guard = agent_watcher()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.visible(limit)
+    Some(agents::resume_command(
+        &agents::sessions_dir(&agents::default_tasks_dir()),
+        uuid,
+    ))
 }
 
 fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
@@ -291,14 +277,47 @@ impl Default for HerdrState {
 /// Plugin de personalización visual y estructural Herdr.
 pub struct HerdrPlugin {
     state: Arc<RwLock<HerdrState>>,
+    agents: SharedAgents,
 }
 
 impl HerdrPlugin {
     /// Crea una nueva instancia del plugin Herdr con valores por defecto.
     pub fn new() -> Self {
+        Self::with_tasks_dir(agents::default_tasks_dir())
+    }
+
+    /// Igual que `new`, pero apuntando a otro directorio de tasks de `pi`.
+    ///
+    /// Existe para que las pruebas no lean el disco real: con la ruta por
+    /// defecto, un subagente recién terminado en la maquina del desarrollador
+    /// cambiaba el resultado del test de "terminal limpio" sin que nada en el
+    /// código hubiera cambiado.
+    pub fn with_tasks_dir(dir: impl Into<PathBuf>) -> Self {
         Self {
             state: Arc::new(RwLock::new(HerdrState::default())),
+            agents: Arc::new(std::sync::Mutex::new(agents::AgentWatcher::new(dir))),
         }
+    }
+
+    /// Subagentes de `pi` visibles ahora mismo, vivos primero.
+    ///
+    /// Se lee de la misma cache que usa la sidebar, asi que una llamada
+    /// tras otra no vuelve a tocar el disco si no ha cambiado nada.
+    pub fn visible_agents(&self, limit: usize) -> Vec<agents::AgentEntry> {
+        let mut guard = self
+            .agents
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.visible(limit)
+    }
+
+    /// Subagentes vivos, la senal de que hay que abrir la barra lateral.
+    pub fn live_agent_count(&self) -> usize {
+        let mut guard = self
+            .agents
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.live_count()
     }
 
     /// Crea un nuevo espacio aparte del actual, solicita una nueva sesión PTY y lo activa.
@@ -640,15 +659,19 @@ impl LayoutHook for HerdrPlugin {
         // Subagentes de pi, leidos en vivo. Se consultan ANTES del gate: si
         // hay alguno vivo, la sidebar tiene que aparecer aunque solo haya un
         // espacio, que es el estado normal de una terminal recien abierta.
-        let live_agents = {
-            let mut guard = agent_watcher()
+        let any_agents = {
+            let mut guard = self
+                .agents
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.live_count()
+            guard.recent(RECENT_WINDOW_SECS).len()
         };
 
-        // Si solo hay un espacio y no hay subagentes vivos, la terminal es limpia
-        if state.spaces.len() <= 1 && live_agents == 0 {
+        // Si solo hay un espacio y no hay ningún subagente, la terminal es limpia.
+        // Se comprueban los terminados además de los vivos a proposito: los
+        // subagentes acaban casi siempre tan rapidos que con el otro criterio
+        // la barra se borraba a los pocos segundos de mostrar un subagente.
+        if state.spaces.len() <= 1 && any_agents == 0 {
             return None;
         }
 
@@ -737,7 +760,8 @@ impl LayoutHook for HerdrPlugin {
         // punto encendido; los terminados, en apagado, para que la diferencia
         // se lea de un vistazo sin leer una sola palabra.
         let agent_rows = {
-            let mut guard = agent_watcher()
+            let mut guard = self
+                .agents
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             guard
@@ -1345,7 +1369,17 @@ mod tests {
 
     #[test]
     fn herdr_opens_clean_terminal_by_default() {
-        let plugin = HerdrPlugin::default();
+        // Con un directorio de tasks vacio, sin subagentes que forzar la barra.
+        // Con la ruta real, un subagente recien terminado en esta maquina
+        // abría la sidebar y el test diria que la terminal no es limpia sin
+        // que nada en el codigo hubiera cambiado.
+        let vacio = std::env::temp_dir().join(format!(
+            "herdr-vacio-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&vacio);
+        let plugin = HerdrPlugin::with_tasks_dir(&vacio);
         assert_eq!(plugin.id(), "herdr");
         assert_eq!(plugin.name(), "Herdr Customization Plugin");
         // Al abrir la terminal por defecto es limpia: sin sidebar ni topbar
