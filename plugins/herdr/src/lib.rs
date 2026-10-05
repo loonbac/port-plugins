@@ -23,6 +23,11 @@ use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
 use port_term_core::pty::RunningApp;
 
+pub(crate) mod agents;
+
+#[cfg(test)]
+mod agents_test;
+
 /// Obtiene el color de acento del wallpaper activo en NixOS (`~/.config/mpvpaper/accent.txt`).
 pub fn system_accent_color() -> Rgb {
     if let Ok(home) = std::env::var("HOME") {
@@ -47,6 +52,48 @@ pub fn parse_hex_color(hex: &str) -> Option<Rgb> {
     let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
     let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
     Some(Rgb::new(r, g, b))
+}
+
+/// Lector de subagentes de `pi`, compartido por todos los renders.
+///
+/// Se guarda en el plugin y no en el estado de la sidebar porque su trabajo es
+/// exactamente el del watcher de configuración: mantener el dato fresco sin
+/// que la UI tenga que pedirlo.
+fn agent_watcher() -> &'static std::sync::Mutex<agents::AgentWatcher> {
+    use std::sync::OnceLock;
+    static WATCHER: OnceLock<std::sync::Mutex<agents::AgentWatcher>> = OnceLock::new();
+    WATCHER.get_or_init(|| {
+        std::sync::Mutex::new(agents::AgentWatcher::new(agents::default_tasks_dir()))
+    })
+}
+
+/// Comando que reabre un subagente de `pi` por su UUID.
+///
+/// Un plugin no puede lanzar procesos, así que esto no se ejecuta: se expone
+/// para que el usuario lo ate a una tecla. Ejemplo:
+///
+/// ```text
+/// port-agent-resume 01a10c0d-91c9-71c4-9cfb-cf218eae1d82
+/// ```
+///
+/// Se lee del disco en vivo, igual que la lista de la sidebar.
+pub fn agent_resume_command(uuid: &str) -> Option<String> {
+    let guard = agent_watcher()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let sessions = agents::sessions_dir(&agents::default_tasks_dir());
+    // El lock se queda tomado mientras se compone el comando para no dejar que
+    // otro render mueva launderlyingCache a mitad.
+    let _ = &*guard;
+    Some(agents::resume_command(&sessions, uuid))
+}
+
+/// Subagentes de `pi` visibles ahora mismo, vivos primero.
+pub fn visible_agents(limit: usize) -> Vec<agents::AgentEntry> {
+    let mut guard = agent_watcher()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.visible(limit)
 }
 
 fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
@@ -590,8 +637,18 @@ impl LayoutHook for HerdrPlugin {
 
     fn left_sidebar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
-        // Si solo hay un espacio, la terminal es limpia y no dibuja barra lateral
-        if state.spaces.len() <= 1 {
+        // Subagentes de pi, leidos en vivo. Se consultan ANTES del gate: si
+        // hay alguno vivo, la sidebar tiene que aparecer aunque solo haya un
+        // espacio, que es el estado normal de una terminal recien abierta.
+        let live_agents = {
+            let mut guard = agent_watcher()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.live_count()
+        };
+
+        // Si solo hay un espacio y no hay subagentes vivos, la terminal es limpia
+        if state.spaces.len() <= 1 && live_agents == 0 {
             return None;
         }
 
@@ -675,6 +732,90 @@ impl LayoutHook for HerdrPlugin {
             spaces_list = spaces_list.child(item);
         }
 
+        // ── Sección AGENTS ──────────────────────────────────────────────────
+        // Lista de subagentes de pi, en vivo. Los vivos van arriba y llevan el
+        // punto encendido; los terminados, en apagado, para que la diferencia
+        // se lea de un vistazo sin leer una sola palabra.
+        let agent_rows = {
+            let mut guard = agent_watcher()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard
+                .visible(agents::DEFAULT_VISIBLE_LIMIT)
+                .into_iter()
+                .map(|entry| {
+                    let dot = if entry.status.is_live() {
+                        accent
+                    } else {
+                        rgb(0x6e7681).into()
+                    };
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .px(px(8.0))
+                        .py(px(6.0))
+                        .rounded(px(6.0))
+                        .bg(accent.opacity(0.10))
+                        .border_1()
+                        .border_color(accent.opacity(0.28))
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .items_center()
+                                        .gap(px(6.0))
+                                        .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .font_weight(FontWeight::BOLD)
+                                                .text_color(if entry.status.is_live() {
+                                                    rgb(0xf0f6fc)
+                                                } else {
+                                                    rgb(0x8b949e)
+                                                })
+                                                .child(entry.agent.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(if entry.status.is_live() {
+                                            accent
+                                        } else {
+                                            rgb(0x6e7681).into()
+                                        })
+                                        .child(entry.status.label()),
+                                ),
+                        )
+                        .child(div().text_size(px(11.0)).text_color(rgb(0x8b949e)).child(
+                            if entry.label.is_empty() {
+                                entry.id.clone()
+                            } else {
+                                entry.label.clone()
+                            },
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x6e7681))
+                                .child(format!(
+                                    "{} turns · {} tools",
+                                    entry.turns, entry.tool_calls
+                                )),
+                        )
+                })
+                .collect::<Vec<_>>()
+        };
+
         // Sidebar con fondo idéntico al de la terminal y compartiendo su opacidad
         let width = state_sidebar_width;
         let resizing = state_is_resizing;
@@ -721,7 +862,47 @@ impl LayoutHook for HerdrPlugin {
                                     .child(format!("{}", spaces.len())),
                             ),
                     )
-                    .child(spaces_list),
+                    .child(spaces_list)
+                    // Subagentes de pi. Solo ocupa sitio si hay alguno, y solo
+                    // muestra los primeros: hay cientos en el historico y todos
+                    // a la vez no aportan nada.
+                    .when(!agent_rows.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .px(px(6.0))
+                                .pt(px(10.0))
+                                .mt(px(4.0))
+                                .border_t(px(1.0))
+                                .border_color(accent.opacity(0.25))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(rgb(0x8b949e))
+                                        .child("AGENTS"),
+                                )
+                                .child(
+                                    div()
+                                        .px(px(6.0))
+                                        .py(px(1.0))
+                                        .rounded(px(4.0))
+                                        .bg(accent.opacity(0.20))
+                                        .border_1()
+                                        .border_color(accent.opacity(0.40))
+                                        .text_size(px(10.0))
+                                        .font_weight(FontWeight::BOLD)
+                                        .text_color(accent)
+                                        .child(format!("{}", agent_rows.len())),
+                                ),
+                        )
+                    })
+                    .when(!agent_rows.is_empty(), |this| {
+                        this.child(div().flex().flex_col().gap(px(4.0)).children(agent_rows))
+                    }),
             )
             .child(
                 div()
