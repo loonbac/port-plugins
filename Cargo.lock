@@ -3898,6 +3898,7 @@ dependencies = [
  "gpui",
  "port-plugin-api",
  "port-term-core",
+ "serde_json",
 ]
 
 [[package]]

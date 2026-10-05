@@ -1,23 +1,37 @@
-//! Subagentes de `pi` (gentle-pi) leídos en tiempo real.
+//! Subagentes de `pi` (gentle-pi) leídos en tiempo real desde la presencia viva.
 //!
-//! gentle-pi deja un archivo JSON por subagente en
-//! `~/.pi/agent/gentle-agents/tasks/`. Aquí solo se leen: ni se escriben ni se
-//! launching. Es exactamente el mismo patrón que el watcher de configuración del
-//! núcleo, pero acotado a lo que el plugin necesita pintar.
+//! La extensión `gentle-agents` publica, por cada sesión que corre un subagente,
+//! un par de archivos en `~/.pi/agent/gentle-agents/presence/` (ver
+//! [`crate::presence`], dueño de ese contrato ajeno). Ahí está la verdad sobre
+//! qué sesiones siguen vivas: mientras un proceso `pi` late, su header se
+//! reescribe; cuando muere, el latido se agota y la sesión deja de contar.
+//!
+//! Los registros de `~/.pi/agent/gentle-agents/tasks/<id>.json` no participan:
+//! gentle-pi los escribe una sola vez, al terminar la tarea, así que mientras un
+//! subagente corre el registro no existe. La presencia viva es la única fuente:
+//! de ella salen la identidad de la sesión, la etiqueta, el estado, la actividad
+//! y el último paso. El hilo (`thread`) se proyecta en [`crate::presence`] y el
+//! visor lo relee del propio archivo de actividad.
+//!
+//! # Visibilidad
+//!
+//! Una fila se pinta si su sesión late (`presence::read_live_sessions`) y,
+//! además, la tarea está activa (`running`, `queued`, `waiting`) o terminó como
+//! mucho hace [`FINISHED_GRACE_MS`]. Esa gracia es política de UI y vive aquí,
+//! no en `presence.rs`.
 //!
 //! # Por qué hay caché y no se lee en cada render
 //!
 //! La ventana de PORT se repinta unas 60 veces por segundo porque el latido del
 //! PTY pide un refresco constante, y `left_sidebar()` se construye en cada uno de
-//! esos renders. Leer 1259 archivos JSON a 60 Hz no deja CPU para nada más.
+//! esos renders. Leer el contrato de presencia a 60 Hz no deja CPU para nada
+//! más.
 //!
-//! La solución es una sola llamada barata por render: `stat` sobre la CARPETA.
-//! El mtime de un directorio cambia cuando se crea o borra un archivo dentro,
-//! que es justo cuando hay algo nuevo que ver. Si el mtime no cambió, la lista
-//! cacheada se devuelve sin tocar ni un archivo.
-//!
-//! Consecuencia: un subagente nuevo aparece en el siguiente frame (~16 ms), y en
-//! reposo el coste es un `stat`.
+//! La primera defensa es un `stat` sobre la CARPETA: el mtime cambia cuando se
+//! crea o borra un archivo dentro, que es justo cuando hay algo nuevo que ver.
+//! La segunda es el TTL: el mtime por sí solo se congela cuando la última sesión
+//! de `pi` muere, así que una caché sin reloj mantendría su fila para siempre.
+//! Ver [`REFRESH_TTL_MS`].
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -25,17 +39,33 @@ use std::time::SystemTime;
 /// Cuántos subagentes se pintan a la vez por defecto.
 pub const DEFAULT_VISIBLE_LIMIT: usize = 6;
 
-/// Dónde guarda gentle-pi la descripción de cada subagente.
-pub fn default_tasks_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("PORT_PI_TASKS_DIR") {
-        return PathBuf::from(dir);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".pi")
-        .join("agent")
-        .join("gentle-agents")
-        .join("tasks")
+/// Ventana de gracia de una fila terminada: se pinta mientras
+/// `now_ms - endedAt <= FINISHED_GRACE_MS`.
+///
+/// Existe para que un subagente que termina mientras el usuario está mirando la
+/// sidebar no desaparezca a mitad de lectura. El valor replica la ventana del
+/// latido del contrato ([`crate::presence::LIVE_WINDOW_MS`]) y es política de
+/// UI: vive aquí, no en `presence.rs`, que solo es dueño del contrato ajeno.
+pub const FINISHED_GRACE_MS: u64 = 15_000;
+
+/// Cada cuánto se relee la presencia aunque el directorio no haya cambiado.
+///
+/// El `mtime` por sí solo no basta: una sesión de `pi` que muere deja de
+/// reescribir su archivo de latido, así que el mtime del directorio se congela y
+/// una caché basada solo en él mantendría esa sesión en pantalla para siempre.
+/// Este TTL acota cuánto puede sobrevivir una fila obsoleta: como mucho se
+/// refresca una vez por segundo.
+pub const REFRESH_TTL_MS: u64 = 1_000;
+
+/// El reloj del sistema en milisegundos desde el epoch.
+///
+/// Se expone para que quien consume el watcher pueda inyectar el mismo instante
+/// en varios puntos de un render, y para que las pruebas controlen el tiempo.
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Estado de un subagente tal como lo reporta gentle-pi.
@@ -43,6 +73,8 @@ pub fn default_tasks_dir() -> PathBuf {
 pub enum AgentStatus {
     Running,
     Queued,
+    /// En espera de un recurso o de otra tarea: sigue siendo trabajo vivo.
+    Waiting,
     Completed,
     Failed,
     /// Un estado que no conocemos: se muestra, pero no se presume bueno.
@@ -50,9 +82,10 @@ pub enum AgentStatus {
 }
 
 impl AgentStatus {
-    /// Un subagente en curso o en cola es lo que el usuario necesita notar.
+    /// Un subagente en curso, en cola o en espera es lo que el usuario necesita
+    /// notar de un vistazo.
     pub fn is_live(&self) -> bool {
-        matches!(self, Self::Running | Self::Queued)
+        matches!(self, Self::Running | Self::Queued | Self::Waiting)
     }
 
     /// Etiqueta corta en inglés, como el resto de la UI.
@@ -60,16 +93,21 @@ impl AgentStatus {
         match self {
             Self::Running => "running".to_string(),
             Self::Queued => "queued".to_string(),
+            Self::Waiting => "waiting".to_string(),
             Self::Completed => "done".to_string(),
             Self::Failed => "failed".to_string(),
             Self::Unknown(raw) => raw.clone(),
         }
     }
 
+    /// Mapeo de los estados crudos: `running`; `queued`/`pending`; `waiting`;
+    /// `completed`/`done`/`finished`/`success`; `failed`/`error`/`aborted`/
+    /// `cancelled`/`canceled`; cualquier otro queda como `Unknown`.
     fn parse(raw: &str) -> Self {
         match raw.trim().to_lowercase().as_str() {
             "running" | "in_progress" | "active" => Self::Running,
-            "queued" | "pending" | "waiting" => Self::Queued,
+            "queued" | "pending" => Self::Queued,
+            "waiting" => Self::Waiting,
             "completed" | "done" | "finished" | "success" => Self::Completed,
             "failed" | "error" | "aborted" | "cancelled" | "canceled" => Self::Failed,
             other => Self::Unknown(other.to_string()),
@@ -78,6 +116,10 @@ impl AgentStatus {
 }
 
 /// Un subagente tal y como se pinta en la sidebar.
+///
+/// Lleva todo lo que el clic necesita para abrir su visor sin volver a tocar el
+/// disco: la identidad exacta de su sesión (hash e incarnación), la etiqueta y
+/// el último paso crudo que pinta la fila.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentEntry {
     pub id: String,
@@ -86,151 +128,12 @@ pub struct AgentEntry {
     pub status: AgentStatus,
     /// Epoch en milisegundos. `0` si el campo no venía.
     pub last_activity_at: u64,
-    pub turns: u32,
-    pub tool_calls: u32,
-    /// UUID de la sesión, extraído del nombre del archivo `.jsonl`.
-    pub session_uuid: Option<String>,
-}
-
-/// Comando que reabre un subagente en una sesión de pi.
-///
-/// Un plugin no puede lanzar procesos, así que esto se expone y se documenta
-/// para que el usuario lo ate a una tecla; no se ejecuta desde aquí.
-pub fn resume_command(session_dir: &Path, uuid: &str) -> String {
-    format!(
-        "pi --session-dir {} --session {}",
-        session_dir.display(),
-        uuid
-    )
-}
-
-/// Directorio de sesiones, que es el hermano de `tasks/`.
-pub fn sessions_dir(tasks_dir: &Path) -> PathBuf {
-    tasks_dir
-        .parent()
-        .map(|parent| parent.join("sessions"))
-        .unwrap_or_else(|| PathBuf::from("sessions"))
-}
-
-/// Saca el UUID del nombre de un `.jsonl` de sesión.
-///
-/// Los nombres tienen la forma `2026-10-05T12-41-58-266Z_<uuid>.jsonl`, pero
-/// también se acepta un nombre que sea solo el UUID: si no hay `_`, el nombre
-/// sin extensión ES el identificador.
-pub fn uuid_from_session_path(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name.strip_suffix(".jsonl").unwrap_or(name);
-    let candidate = match stem.rsplit_once('_') {
-        Some((_, tail)) => tail,
-        None => stem,
-    };
-    let candidate = candidate.trim();
-    if candidate.is_empty() {
-        None
-    } else {
-        Some(candidate.to_string())
-    }
-}
-
-// ── Lectura de JSON ────────────────────────────────────────────────────────
-//
-// A propósito sin `serde_json`: el workspace no lo trae y añadir una
-// dependencia por leer cinco campos sería más ruido que el propio lector. Solo
-// se承认 lo que se usa y se descarta el resto.
-
-/// Busca el valor de una clave de primer nivel dentro de un objeto JSON.
-fn json_field<'a>(source: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("\"{key}\"");
-    let mut from = 0usize;
-    while let Some(at) = source[from..].find(&needle) {
-        let start = from + at + needle.len();
-        let bytes = source.as_bytes();
-        // Saltar espacios y el `:` antes del valor.
-        let mut i = start;
-        while i < bytes.len() && (bytes[i] as char).is_whitespace() {
-            i += 1;
-        }
-        if i < bytes.len() && bytes[i] == b':' {
-            i += 1;
-            while i < bytes.len() && (bytes[i] as char).is_whitespace() {
-                i += 1;
-            }
-            if i < bytes.len() {
-                return Some(&source[i..]);
-            }
-        }
-        from = start;
-    }
-    None
-}
-
-/// Valor de una clave como string, sin comillas ni escapes.
-fn json_string(source: &str, key: &str) -> Option<String> {
-    let raw = json_field(source, key)?;
-    let raw = raw.trim_start();
-    if !raw.starts_with('"') {
-        // Puede ser null, un número o un objeto: no es un string.
-        return None;
-    }
-    let bytes = raw.as_bytes();
-    let mut out = String::new();
-    let mut i = 1usize;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'"' => return Some(out),
-            b'\\' if i + 1 < bytes.len() => {
-                i += 1;
-                out.push(bytes[i] as char);
-            }
-            other => out.push(other as char),
-        }
-        i += 1;
-    }
-    None
-}
-
-/// Valor de una clave como entero, aceptando también `12.0`.
-fn json_u64(source: &str, key: &str) -> Option<u64> {
-    let raw = json_field(source, key)?;
-    let raw = raw.trim_start();
-    if raw.starts_with('"') {
-        return json_string(source, key)?.parse().ok();
-    }
-    let end = raw
-        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-' || c == 'e' || c == '+'))
-        .unwrap_or(raw.len());
-    let number: f64 = raw[..end].parse().ok()?;
-    if number < 0.0 {
-        None
-    } else {
-        Some(number as u64)
-    }
-}
-
-/// Parsea un archivo de task de gentle-pi.
-///
-/// Devuelve `None` si el archivo no es un task válido. Un JSON roto no debe
-/// romper la sidebar, así que se descarta en silencio.
-pub fn parse_task(source: &str) -> Option<AgentEntry> {
-    let id = json_string(source, "id")?;
-    let agent = json_string(source, "agent").unwrap_or_else(|| "agent".to_string());
-    let label = json_string(source, "label").unwrap_or_default();
-    let status = json_string(source, "status")
-        .map(|raw| AgentStatus::parse(&raw))
-        .unwrap_or(AgentStatus::Unknown("unknown".to_string()));
-    let session_uuid =
-        json_string(source, "sessionPath").and_then(|raw| uuid_from_session_path(Path::new(&raw)));
-
-    Some(AgentEntry {
-        id,
-        agent,
-        label,
-        status,
-        last_activity_at: json_u64(source, "lastActivityAt").unwrap_or(0),
-        turns: json_u64(source, "turns").unwrap_or(0) as u32,
-        tool_calls: json_u64(source, "toolCalls").unwrap_or(0) as u32,
-        session_uuid,
-    })
+    /// Último paso crudo (`summary.lastStep`); `""` si falta.
+    pub last_step: String,
+    /// Hash de la sesión dueña de la tarea.
+    pub session_hash: String,
+    /// Incarnación (UUID v4) de la sesión dueña de la tarea.
+    pub incarnation: String,
 }
 
 /// Ordena: vivos primero, y dentro de cada grupo por actividad reciente.
@@ -243,29 +146,30 @@ fn order(entries: &mut [AgentEntry]) {
     });
 }
 
-/// Lee los tasks del disco, sin caché. Pensado para tests y para el refresco.
-pub fn read_tasks(dir: &Path) -> Vec<AgentEntry> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut out: Vec<AgentEntry> = entries
-        .flatten()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
-        .filter_map(|entry| std::fs::read_to_string(entry.path()).ok())
-        .filter_map(|text| parse_task(&text))
-        .collect();
-    order(&mut out);
-    out
+/// Decide si una tarea de la presencia se pinta.
+///
+/// Las activas siempre; las terminadas solo mientras su `endedAt` cae dentro de
+/// la gracia. Una tarea terminada sin `endedAt` no se pinta.
+fn is_visible(status: &AgentStatus, ended_at: Option<u64>, now_ms: u64) -> bool {
+    if status.is_live() {
+        return true;
+    }
+    match ended_at {
+        Some(ended) => now_ms >= ended && now_ms - ended <= FINISHED_GRACE_MS,
+        None => false,
+    }
 }
 
-/// Caché con detección de cambios por `mtime` de la carpeta.
+/// Caché de la presencia viva.
 ///
 /// Es lo que hace que leer sea "en tiempo real" sin coste en reposo: un `stat`
-/// por render, y relectura completa solo cuando hay algo nuevo.
+/// por render, y relectura completa solo cuando hay algo nuevo o cuando vence el
+/// TTL.
 #[derive(Debug, Default)]
 pub struct AgentWatcher {
-    dir: PathBuf,
+    presence_dir: PathBuf,
     stamp: Option<SystemTime>,
+    last_refresh_ms: u64,
     cached: Vec<AgentEntry>,
     /// Cuántas veces se ha reescrito la caché. Sirve para demostrar en los tests
     /// que una lectura sin cambios no vuelve a tocar el disco.
@@ -273,52 +177,70 @@ pub struct AgentWatcher {
 }
 
 impl AgentWatcher {
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
+    /// `presence_dir` es la única fuente: no hay registro de tarea que leer.
+    pub fn new(presence_dir: impl Into<PathBuf>) -> Self {
         Self {
-            dir: dir.into(),
+            presence_dir: presence_dir.into(),
             stamp: None,
+            last_refresh_ms: 0,
             cached: Vec::new(),
             refreshes: 0,
         }
     }
 
-    /// Lista de subagentes, releyendo solo si la carpeta cambió.
-    pub fn entries(&mut self) -> &[AgentEntry] {
-        let stamp = std::fs::metadata(&self.dir).and_then(|m| m.modified()).ok();
-        if stamp != self.stamp {
+    /// Directorio de presencia que vigila. El clic lo necesita para construir el
+    /// comando del visor sin depender del registro de tarea.
+    pub fn presence_dir(&self) -> &Path {
+        &self.presence_dir
+    }
+
+    /// Filas visibles ahora mismo, con el reloj inyectado.
+    ///
+    /// Se relee si el mtime de la carpeta de presencia cambió o si se cumplió
+    /// [`REFRESH_TTL_MS`]. El TTL es una condición de correctitud, no una
+    /// optimización: sin él, la última fila de una sesión muerta quedaría
+    /// congelada en pantalla porque el directorio deja de cambiar.
+    pub fn entries(&mut self, now_ms: u64) -> &[AgentEntry] {
+        let stamp = std::fs::metadata(&self.presence_dir)
+            .and_then(|meta| meta.modified())
+            .ok();
+        let ttl_expired = now_ms.saturating_sub(self.last_refresh_ms) >= REFRESH_TTL_MS;
+        if stamp != self.stamp || ttl_expired {
             self.stamp = stamp;
-            self.cached = read_tasks(&self.dir);
+            self.last_refresh_ms = now_ms;
+            self.cached = self.refresh(now_ms);
             self.refreshes += 1;
         }
         &self.cached
     }
 
-    /// Subagentes vivos: los que el usuario necesita notar de un vistazo.
-    pub fn live_count(&mut self) -> usize {
-        self.entries().iter().filter(|e| e.status.is_live()).count()
+    /// Las que se pintan, vivos primero, con tope.
+    pub fn visible(&mut self, now_ms: u64, limit: usize) -> Vec<AgentEntry> {
+        self.entries(now_ms).iter().take(limit).cloned().collect()
     }
 
-    /// Vivos + los terminados en la ultima `window` segundos.
-    ///
-    /// Reciente no es "los mas nuevos de siempre": la carpeta trae cientos de
-    /// tareas de hace semanas y listarlas en una terminal recien abierta seria
-    /// puro ruido. Con ventana, el que acabo de terminar se ve mientras dura
-    /// su rastro, y lo de septiembre no estorba.
-    pub fn recent(&mut self, window_secs: u64) -> Vec<AgentEntry> {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let cutoff = now.saturating_sub(window_secs * 1000);
-        self.entries()
-            .iter()
-            .filter(|e| e.status.is_live() || e.last_activity_at >= cutoff)
-            .cloned()
-            .collect()
-    }
-
-    /// Los que se pintan: vivos primero, con tope.
-    pub fn visible(&mut self, limit: usize) -> Vec<AgentEntry> {
-        self.entries().iter().take(limit).cloned().collect()
+    /// Reconstruye la lista desde la presencia viva.
+    fn refresh(&self, now_ms: u64) -> Vec<AgentEntry> {
+        let mut out: Vec<AgentEntry> = Vec::new();
+        for session in crate::presence::read_live_sessions(&self.presence_dir, now_ms) {
+            for task in session.tasks {
+                let status = AgentStatus::parse(&task.status);
+                if !is_visible(&status, task.ended_at, now_ms) {
+                    continue;
+                }
+                out.push(AgentEntry {
+                    id: task.id,
+                    agent: task.agent,
+                    label: task.label,
+                    status,
+                    last_activity_at: task.last_activity_at,
+                    last_step: task.last_step,
+                    session_hash: session.session_hash.clone(),
+                    incarnation: session.incarnation.clone(),
+                });
+            }
+        }
+        order(&mut out);
+        out
     }
 }

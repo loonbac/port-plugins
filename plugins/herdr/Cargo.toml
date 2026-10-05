@@ -9,3 +9,4 @@ description = "PORT Plugin: Herdr customization plugin con spaces en sidebar, ta
 port-plugin-api = { workspace = true }
 port-term-core = { workspace = true }
 gpui = { workspace = true }
+serde_json = { workspace = true }

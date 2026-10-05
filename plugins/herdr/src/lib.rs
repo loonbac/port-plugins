@@ -21,12 +21,20 @@ use port_plugin_api::{
 };
 use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
-use port_term_core::pty::RunningApp;
+use port_term_core::pty::{PtyConfig, RunningApp};
 
 pub(crate) mod agents;
+pub(crate) mod presence;
+pub(crate) mod viewer;
 
 #[cfg(test)]
 mod agents_test;
+
+#[cfg(test)]
+mod presence_test;
+
+#[cfg(test)]
+mod viewer_test;
 
 /// Obtiene el color de acento del wallpaper activo en NixOS (`~/.config/mpvpaper/accent.txt`).
 pub fn system_accent_color() -> Rgb {
@@ -59,32 +67,26 @@ pub fn parse_hex_color(hex: &str) -> Option<Rgb> {
 /// Se guarda en el plugin y no en el estado de la sidebar porque su trabajo es
 /// exactamente el del watcher de configuración: mantener el dato fresco sin
 /// que la UI tenga que pedirlo.
-/// Durante cuanto segundos despues de terminar un subagente sigue contando como
-/// reciente para decidir si la barra lateral se muestra.
-const RECENT_WINDOW_SECS: u64 = 600;
-
 type SharedAgents = Arc<std::sync::Mutex<agents::AgentWatcher>>;
-
-/// Comando que reabre un subagente de `pi` por su UUID.
-///
-/// Un plugin no puede lanzar procesos, así que esto no se ejecuta: se expone
-/// para que el usuario lo ate a una tecla. Ejemplo:
-///
-/// ```text
-/// port-agent-resume 01a10c0d-91c9-71c4-9cfb-cf218eae1d82
-/// ```
-///
-/// Se lee del disco en vivo, igual que la lista de la sidebar.
-pub fn agent_resume_command(uuid: &str) -> Option<String> {
-    Some(agents::resume_command(
-        &agents::sessions_dir(&agents::default_tasks_dir()),
-        uuid,
-    ))
-}
 
 fn to_hsla(rgb_val: Rgb) -> gpui::Hsla {
     let packed = ((rgb_val.r as u32) << 16) | ((rgb_val.g as u32) << 8) | (rgb_val.b as u32);
     rgb(packed).into()
+}
+
+/// Estado original de una pestaña que el visor de un subagente está ocupando.
+///
+/// El clic no crea ninguna pestaña: retargetea la activa al visor y guarda aquí
+/// lo que el usuario tenía a la vista, para devolvérselo tal cual cuando la
+/// sesión del visor se cierre. La pestaña nunca se destruye, solo se restaura.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WatchedTab {
+    /// Sesión original de la pestaña, la que hay que devolverle al salir.
+    pub session_id: usize,
+    /// Título original de la pestaña.
+    pub title: String,
+    /// Si el título original estaba fijado por el plugin.
+    pub title_locked: bool,
 }
 
 /// Definición de una pestaña de terminal con su sesión asociada.
@@ -95,6 +97,30 @@ pub struct HerdrTab {
     pub session_id: usize,
     /// Programa que se está ejecutando en primer plano en esta pestaña.
     pub app: Option<RunningApp>,
+    /// Título fijado por el plugin y no por el directorio de trabajo.
+    ///
+    /// Lo usa la pestaña del visor de un subagente: `update_session_cwd`
+    /// renombra las pestañas normales con el nombre de la carpeta, pero pisar el
+    /// título del visor borraría el nombre del subagente que se está mirando.
+    pub title_locked: bool,
+    /// Terminal original que el visor de un subagente está ocupando, si lo hay.
+    ///
+    /// Mientras está presente, la pestaña muestra la sesión del visor en lugar
+    /// de la suya; [`WatchedTab`] conserva lo necesario para devolverla a su
+    /// terminal original cuando el visor se cierre.
+    pub watching: Option<WatchedTab>,
+}
+
+impl HerdrTab {
+    /// Sesión del visor que ocupa esta pestaña, si el núcleo ya la creó.
+    ///
+    /// Antes de que exista, `session_id` sigue siendo el del terminal original
+    /// guardado en `watching`: en esa ventana la pestaña todavía muestra el
+    /// terminal del usuario y no hay visor que cerrar ni que ignorar.
+    fn viewer_session_id(&self) -> Option<usize> {
+        let previo = self.watching.as_ref()?;
+        (self.session_id != previo.session_id).then_some(self.session_id)
+    }
 }
 
 /// Identificador centinela para una pestaña que todavía no tiene sesión asignada.
@@ -163,6 +189,25 @@ fn app_identity(app: &RunningApp) -> (char, String) {
     (ICON_ROBOT, humanize(bin))
 }
 
+/// Identidad visible de una pestaña en la barra superior: `(icono, texto)`.
+///
+/// El título fijado por el plugin manda siempre sobre la app en primer plano:
+/// la pestaña del visor corre `bash -c tail|jq`, y esa app no significa nada
+/// para el usuario. Sin título fijado, manda la app (icono + nombre legible) y,
+/// en reposo, manda el título de la pestaña.
+fn tab_identity(tab: &HerdrTab) -> (Option<char>, String) {
+    if tab.title_locked {
+        return (None, tab.title.clone());
+    }
+    match tab.app.as_ref() {
+        Some(app) => {
+            let (icon, label) = app_identity(app);
+            (Some(icon), label)
+        }
+        None => (None, tab.title.clone()),
+    }
+}
+
 /// Ancho por defecto de la barra lateral de espacios, en píxeles lógicos.
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 236.0;
 /// Ancho mínimo: por debajo el nombre de las ramas deja de caber.
@@ -196,6 +241,24 @@ pub struct HerdrSpace {
     pub active_tab_index: usize,
 }
 
+/// Petición de visor de un subagente pendiente de que el núcleo cree su sesión.
+///
+/// La escribe el clic de una fila de AGENTS. Es la primera de las dos
+/// preocupaciones del visor: aquí vive lo que el clic sabe (qué sesión seguir,
+/// con qué identidad exacta, dónde está su presencia y a qué subagente
+/// pertenece). Nunca es una ruta de registro.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingWatch {
+    /// Hash de la sesión que se va a seguir.
+    pub session_hash: String,
+    /// Incarnación (UUID v4) de esa sesión.
+    pub incarnation: String,
+    /// Etiqueta del subagente dueño de la sesión, para titular su pestaña.
+    pub agent_label: String,
+    /// Directorio donde vive la actividad publicada de esa sesión.
+    pub presence_dir: PathBuf,
+}
+
 /// Estado interno del plugin Herdr.
 #[derive(Debug, Clone)]
 pub struct HerdrState {
@@ -205,6 +268,15 @@ pub struct HerdrState {
     pub accent_mode: String,
     pub new_session_requested: bool,
     pub close_session_requested: Option<usize>,
+    /// Visor pedido por un clic y todavía no consumido por el núcleo.
+    pending_watch: Option<PendingWatch>,
+    /// Segunda preocupación del visor: el título que debe recibir la pestaña de
+    /// la próxima sesión que cree el núcleo.
+    ///
+    /// `take_spawn_session_request` lo deja aquí al consumir `pending_watch`
+    /// (la pestaña aún no existe cuando el núcleo pide la sesión) y
+    /// `on_session_created` lo aplica y lo agota.
+    pending_viewer_title: Option<String>,
     /// Ancho actual de la barra lateral, ajustable arrastrando el asidero.
     pub sidebar_width: f32,
     /// Posición X donde empezó el arrastre de ancho, si lo hay.
@@ -226,6 +298,8 @@ fn default_space() -> HerdrSpace {
             title: "terminal".to_string(),
             session_id: 0,
             app: None,
+            title_locked: false,
+            watching: None,
         }],
         active_tab_index: 0,
     }
@@ -241,6 +315,43 @@ impl HerdrState {
         } else {
             system_accent_color()
         }
+    }
+
+    /// Retargetea la pestaña activa del espacio activo al visor de un subagente
+    /// y deja pendiente su petición.
+    ///
+    /// Es el único camino del clic. No crea nada: guarda en la pestaña activa su
+    /// terminal original (sesión, título y bloqueo) y marca en ella el visor. Al
+    /// ocupar el área principal se siente como cambiar a un espacio limpio, pero
+    /// sigue siendo la misma pestaña y el mismo espacio, así que al salir vuelve
+    /// exactamente el terminal que el usuario tenía. No pide un shell:
+    /// `new_session_requested` se queda en `false` a propósito para que el núcleo
+    /// cree la sesión con `take_spawn_session_request` (el visor) y no con un
+    /// shell por defecto.
+    fn open_watch_tab(
+        &mut self,
+        presence_dir: &Path,
+        session_hash: &str,
+        incarnation: &str,
+        agent_label: &str,
+    ) {
+        let space_idx = self.active_space_index;
+        if let Some(space) = self.spaces.get_mut(space_idx) {
+            let tab_idx = space.active_tab_index;
+            if let Some(tab) = space.tabs.get_mut(tab_idx) {
+                tab.watching = Some(WatchedTab {
+                    session_id: tab.session_id,
+                    title: tab.title.clone(),
+                    title_locked: tab.title_locked,
+                });
+            }
+        }
+        self.pending_watch = Some(PendingWatch {
+            session_hash: session_hash.to_string(),
+            incarnation: incarnation.to_string(),
+            agent_label: agent_label.to_string(),
+            presence_dir: presence_dir.to_path_buf(),
+        });
     }
 }
 
@@ -258,6 +369,8 @@ impl Default for HerdrState {
                     title: "terminal".to_string(),
                     session_id: 0,
                     app: None,
+                    title_locked: false,
+                    watching: None,
                 }],
                 active_tab_index: 0,
             }],
@@ -265,6 +378,8 @@ impl Default for HerdrState {
             accent_mode: "auto".to_string(),
             new_session_requested: false,
             close_session_requested: None,
+            pending_watch: None,
+            pending_viewer_title: None,
             sidebar_width: SIDEBAR_DEFAULT_WIDTH,
             resize_anchor_x: None,
             resize_start_width: SIDEBAR_DEFAULT_WIDTH,
@@ -272,6 +387,64 @@ impl Default for HerdrState {
             next_space_num: 2,
         }
     }
+}
+
+/// Extrae de una fila de AGENTS lo que el visor necesita: la identidad exacta
+/// de su sesión (hash e incarnación) y la etiqueta con la que titular la
+/// pestaña.
+///
+/// `None` solo si la fila no trae identidad de sesión, algo que la presencia ya
+/// valida al publicarla. La etiqueta cae al `id` cuando viene vacía, igual que la
+/// propia fila pintada.
+fn watch_target(entry: &agents::AgentEntry) -> Option<(&str, &str, &str)> {
+    if entry.session_hash.is_empty() || entry.incarnation.is_empty() {
+        return None;
+    }
+    let label = if entry.label.is_empty() {
+        entry.id.as_str()
+    } else {
+        entry.label.as_str()
+    };
+    Some((
+        entry.session_hash.as_str(),
+        entry.incarnation.as_str(),
+        label,
+    ))
+}
+
+/// Camino único del clic: pide el visor de una fila de AGENTS.
+///
+/// `false` sin pedir nada cuando la fila no trae identidad de sesión. El clic de
+/// la sidebar y [`HerdrPlugin::watch_entry`] entran por aquí, así que la prueba
+/// ejercita exactamente el mismo código que el clic.
+fn request_watch(
+    state: &RwLock<HerdrState>,
+    presence_dir: &Path,
+    entry: &agents::AgentEntry,
+) -> bool {
+    let Some((session_hash, incarnation, label)) = watch_target(entry) else {
+        return false;
+    };
+    state
+        .write()
+        .unwrap()
+        .open_watch_tab(presence_dir, session_hash, incarnation, label);
+    true
+}
+
+/// Máximo de caracteres del último paso que pinta la fila de AGENTS.
+const AGENT_STEP_MAX_CHARS: usize = 80;
+
+/// Recorta el último paso a una sola línea y a [`AGENT_STEP_MAX_CHARS`]
+/// caracteres, con `…` cuando se corta.
+fn clip_last_step(raw: &str) -> String {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= AGENT_STEP_MAX_CHARS {
+        return collapsed;
+    }
+    let mut clipped: String = collapsed.chars().take(AGENT_STEP_MAX_CHARS).collect();
+    clipped.push('…');
+    clipped
 }
 
 /// Plugin de personalización visual y estructural Herdr.
@@ -283,19 +456,21 @@ pub struct HerdrPlugin {
 impl HerdrPlugin {
     /// Crea una nueva instancia del plugin Herdr con valores por defecto.
     pub fn new() -> Self {
-        Self::with_tasks_dir(agents::default_tasks_dir())
+        Self::with_presence_dir(presence::default_presence_dir())
     }
 
-    /// Igual que `new`, pero apuntando a otro directorio de tasks de `pi`.
+    /// Igual que `new`, pero apuntando a otro directorio de presencia.
     ///
     /// Existe para que las pruebas no lean el disco real: con la ruta por
-    /// defecto, un subagente recién terminado en la maquina del desarrollador
+    /// defecto, un subagente recién terminado en la máquina del desarrollador
     /// cambiaba el resultado del test de "terminal limpio" sin que nada en el
     /// código hubiera cambiado.
-    pub fn with_tasks_dir(dir: impl Into<PathBuf>) -> Self {
+    pub fn with_presence_dir(presence_dir: impl Into<PathBuf>) -> Self {
         Self {
             state: Arc::new(RwLock::new(HerdrState::default())),
-            agents: Arc::new(std::sync::Mutex::new(agents::AgentWatcher::new(dir))),
+            agents: Arc::new(std::sync::Mutex::new(agents::AgentWatcher::new(
+                presence_dir,
+            ))),
         }
     }
 
@@ -308,16 +483,45 @@ impl HerdrPlugin {
             .agents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.visible(limit)
+        guard.visible(agents::now_ms(), limit)
     }
 
-    /// Subagentes vivos, la senal de que hay que abrir la barra lateral.
-    pub fn live_agent_count(&self) -> usize {
+    /// Pide el visor para la fila de AGENTS pulsada.
+    ///
+    /// Devuelve `false` sin pedir nada si la fila no trae identidad de sesión. La
+    /// prueba la usa para ejercitar el mismo camino que el clic, que GPUI solo
+    /// puede despachar con una ventana real.
+    pub fn watch_entry(&self, entry: &agents::AgentEntry) -> bool {
+        let presence_dir = self
+            .agents
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .presence_dir()
+            .to_path_buf();
+        request_watch(&self.state, &presence_dir, entry)
+    }
+
+    /// ¿La barra lateral tiene que estar en pantalla?
+    ///
+    /// Un solo criterio decide el ancho que se reserva en el layout y el dibujo
+    /// de la barra. Importa que no diverjan: si el ancho reservado fuera 0
+    /// mientras la barra se pinta (un solo espacio con subagentes vivos), PORT
+    /// la dibujaría fuera de la caja de su contenedor y GPUI, que solo entrega
+    /// el ratón dentro de la caja del padre, dejaría de dar el clic a sus filas.
+    /// La barra se seguiría viendo y ninguna fila respondería.
+    ///
+    /// Cuenta tanto los subagentes vivos como los terminados dentro de su gracia
+    /// a propósito: los subagentes acaban casi siempre tan rápidos que, sin esa
+    /// gracia, la barra se borraba a los pocos segundos de mostrarse.
+    fn sidebar_shown(&self, state: &HerdrState, now_ms: u64) -> bool {
+        if state.spaces.len() > 1 {
+            return true;
+        }
         let mut guard = self
             .agents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.live_count()
+        !guard.entries(now_ms).is_empty()
     }
 
     /// Crea un nuevo espacio aparte del actual, solicita una nueva sesión PTY y lo activa.
@@ -338,6 +542,8 @@ impl HerdrPlugin {
                 title: "terminal".to_string(),
                 session_id: PENDING_SESSION, // on_session_created lo reemplaza
                 app: None,
+                title_locked: false,
+                watching: None,
             }],
             active_tab_index: 0,
         });
@@ -359,6 +565,8 @@ impl HerdrPlugin {
                 title: format!("term {}", space.tabs.len() + 1),
                 session_id: PENDING_SESSION, // on_session_created lo reemplaza
                 app: None,
+                title_locked: false,
+                watching: None,
             });
             space.active_tab_index = space.tabs.len() - 1;
             s.new_session_requested = true;
@@ -454,8 +662,36 @@ impl HerdrPlugin {
         }
     }
 
+    /// Pide al núcleo cerrar la sesión del visor que ocupa la pestaña activa.
+    ///
+    /// Devuelve `false` en una pestaña normal, para que su atajo siga su curso.
+    /// Cerrar la sesión del visor es lo único que hace salir del visor: el
+    /// núcleo avisa con `on_session_closed` y ahí la pestaña se restaura.
+    pub fn request_viewer_close(&self) -> bool {
+        let mut s = self.state.write().unwrap();
+        let viewer_session_id = s
+            .spaces
+            .get(s.active_space_index)
+            .and_then(|space| space.tabs.get(space.active_tab_index))
+            .and_then(HerdrTab::viewer_session_id);
+        match viewer_session_id {
+            Some(session_id) => {
+                s.close_session_requested = Some(session_id);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Cierra la pestaña activa en el espacio actual si hay más de una.
+    ///
+    /// Una pestaña ocupada por el visor no se borra nunca: se le pide al núcleo
+    /// cerrar la sesión del visor y `on_session_closed` la devuelve a su
+    /// terminal original.
     pub fn close_active_tab(&self) -> bool {
+        if self.request_viewer_close() {
+            return true;
+        }
         let mut s = self.state.write().unwrap();
         let space_idx = s.active_space_index;
         let mut closed_session = None;
@@ -524,13 +760,49 @@ impl SpaceHook for HerdrPlugin {
         req
     }
 
+    /// Petición de una sesión que corre el visor de un subagente.
+    ///
+    /// Es de un solo uso: la primera llamada se lleva el visor pendiente y
+    /// guarda su etiqueta para la pestaña; las siguientes devuelven `None`.
+    fn take_spawn_session_request(&self) -> Option<PtyConfig> {
+        let mut s = self.state.write().unwrap();
+        let watch = s.pending_watch.take()?;
+        // La etiqueta sobrevive a la petición porque la pestaña que la va a
+        // recibir no existe hasta que el núcleo cree la sesión.
+        s.pending_viewer_title = Some(watch.agent_label.clone());
+        Some(viewer::watch_command(
+            &watch.presence_dir,
+            &watch.session_hash,
+            &watch.incarnation,
+            &watch.agent_label,
+        ))
+    }
+
     fn on_session_created(&self, session_id: usize) {
         let mut s = self.state.write().unwrap();
+        // El título del visor se aplica una sola vez: la pestaña activa —la que
+        // el clic dejó apuntando al visor, o la que el núcleo acaba de crear sin
+        // sesión— lo recibe, y se agota para que la siguiente no lo herede.
+        let target_is_viewer = s
+            .spaces
+            .get(s.active_space_index)
+            .and_then(|space| space.tabs.get(space.active_tab_index))
+            .is_some_and(|tab| tab.watching.is_some() || tab.session_id == PENDING_SESSION);
+        let viewer_title = if target_is_viewer {
+            s.pending_viewer_title.take()
+        } else {
+            None
+        };
+
         let space_idx = s.active_space_index;
         if let Some(space) = s.spaces.get_mut(space_idx) {
             let tab_idx = space.active_tab_index;
             if let Some(tab) = space.tabs.get_mut(tab_idx) {
                 tab.session_id = session_id;
+                if let Some(title) = viewer_title {
+                    tab.title = title;
+                    tab.title_locked = true;
+                }
             }
         }
     }
@@ -541,7 +813,12 @@ impl SpaceHook for HerdrPlugin {
             for tab in space.tabs.iter_mut() {
                 // Una pestaña sin sesión asignada no puede recibir datos: si se
                 // aceptara, heredaría la app de otra pestaña por colisión de id.
-                if tab.session_id == session_id && tab.session_id != PENDING_SESSION {
+                // La pestaña que el visor ocupa tampoco: su app es `bash -c
+                // tail|jq` y no significa nada para el usuario.
+                if tab.session_id == session_id
+                    && tab.session_id != PENDING_SESSION
+                    && tab.viewer_session_id() != Some(session_id)
+                {
                     tab.app = app.cloned();
                 }
             }
@@ -555,6 +832,20 @@ impl SpaceHook for HerdrPlugin {
 
     fn on_session_closed(&self, session_id: usize) {
         let mut s = self.state.write().unwrap();
+
+        // La sesión del visor no se lleva su pestaña: la pestaña vuelve a su
+        // terminal original con la sesión, el título y el bloqueo que tenía.
+        for space in s.spaces.iter_mut() {
+            for tab in space.tabs.iter_mut() {
+                if tab.viewer_session_id() == Some(session_id) {
+                    if let Some(previo) = tab.watching.take() {
+                        tab.session_id = previo.session_id;
+                        tab.title = previo.title;
+                        tab.title_locked = previo.title_locked;
+                    }
+                }
+            }
+        }
 
         // Quita la pestaña que pertenecía a esa sesión.
         for space in s.spaces.iter_mut() {
@@ -578,23 +869,36 @@ impl SpaceHook for HerdrPlugin {
     fn update_session_cwd(&self, session_id: usize, cwd: &Path, folder_name: &str) {
         let mut s = self.state.write().unwrap();
         for space in s.spaces.iter_mut() {
-            // Solo el espacio propietario de la sesión se renombra.
-            let contains_session = space
-                .tabs
-                .iter()
-                .any(|t| t.session_id == session_id && t.session_id != PENDING_SESSION);
+            // Solo el espacio propietario de la sesión se renombra. Una pestaña
+            // con título bloqueado (el visor de un subagente) no cuenta como
+            // dueña: su sesión vive dentro del espacio del usuario, y dejar que
+            // su cwd renombrara el espacio pisaría el contexto que el usuario ya
+            // tenía. El nombre del subagente vive en la pestaña, no en el
+            // espacio.
+            let contains_session = space.tabs.iter().any(|t| {
+                t.session_id == session_id
+                    && t.session_id != PENDING_SESSION
+                    && !t.title_locked
+                    && t.viewer_session_id() != Some(session_id)
+            });
             if !contains_session {
                 continue;
             }
 
+            // El espacio propietario de la sesión se renombra con la carpeta.
             if !folder_name.is_empty() {
                 space.name = folder_name.to_string();
             }
 
             // Si la pestaña tiene nombre por defecto, se actualiza con la carpeta.
+            // La pestaña del visor queda fuera: su título es el nombre del
+            // subagente que se está mirando, no la carpeta del shell, y
+            // pisarlo borraría justo el dato que el usuario abrió a ver.
             for tab in space.tabs.iter_mut() {
                 if tab.session_id == session_id
                     && tab.session_id != PENDING_SESSION
+                    && !tab.title_locked
+                    && tab.viewer_session_id() != Some(session_id)
                     && (tab.title == "terminal" || tab.title.starts_with("term "))
                 {
                     tab.title = folder_name.to_string();
@@ -632,7 +936,7 @@ fn detect_git_branch(cwd: &Path) -> Option<String> {
 impl LayoutHook for HerdrPlugin {
     fn left_sidebar_width(&self) -> f32 {
         let s = self.state.read().unwrap();
-        if s.spaces.len() > 1 {
+        if self.sidebar_shown(&s, agents::now_ms()) {
             s.sidebar_width
         } else {
             0.0
@@ -657,21 +961,15 @@ impl LayoutHook for HerdrPlugin {
     fn left_sidebar(&self) -> Option<AnyElement> {
         let state = self.state.read().unwrap();
         // Subagentes de pi, leidos en vivo. Se consultan ANTES del gate: si
-        // hay alguno vivo, la sidebar tiene que aparecer aunque solo haya un
+        // hay alguno visible, la sidebar tiene que aparecer aunque solo haya un
         // espacio, que es el estado normal de una terminal recien abierta.
-        let any_agents = {
-            let mut guard = self
-                .agents
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.recent(RECENT_WINDOW_SECS).len()
-        };
+        // El reloj se toma una sola vez por render y se reutiliza en la lista.
+        let now = agents::now_ms();
 
-        // Si solo hay un espacio y no hay ningún subagente, la terminal es limpia.
-        // Se comprueban los terminados además de los vivos a proposito: los
-        // subagentes acaban casi siempre tan rapidos que con el otro criterio
-        // la barra se borraba a los pocos segundos de mostrar un subagente.
-        if state.spaces.len() <= 1 && any_agents == 0 {
+        // El mismo criterio que reserva el ancho de la barra decide si se pinta
+        // (ver `sidebar_shown`). Si sólo hay un espacio y no hay subagentes
+        // visibles, la terminal es limpia.
+        if !self.sidebar_shown(&state, now) {
             return None;
         }
 
@@ -759,13 +1057,21 @@ impl LayoutHook for HerdrPlugin {
         // Lista de subagentes de pi, en vivo. Los vivos van arriba y llevan el
         // punto encendido; los terminados, en apagado, para que la diferencia
         // se lea de un vistazo sin leer una sola palabra.
+        //
+        // Cada fila es pulsable: abre el visor de su sesión. La copia del
+        // estado se toma fuera del cierre y se escribe bajo el candado dentro,
+        // igual que el resto de filas pulsables de este archivo.
+        let state_for_agent_rows = Arc::clone(&self.state);
         let agent_rows = {
             let mut guard = self
                 .agents
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            // El clic necesita el directorio de presencia para construir el
+            // comando del visor; se copia antes del préstamo mutable.
+            let presence_dir = guard.presence_dir().to_path_buf();
             guard
-                .visible(agents::DEFAULT_VISIBLE_LIMIT)
+                .visible(now, agents::DEFAULT_VISIBLE_LIMIT)
                 .into_iter()
                 .map(|entry| {
                     let dot = if entry.status.is_live() {
@@ -773,6 +1079,11 @@ impl LayoutHook for HerdrPlugin {
                     } else {
                         rgb(0x6e7681).into()
                     };
+                    // El cierre se puede invocar más de una vez, así que la
+                    // fila se captura por valor en lugar de prestarse.
+                    let row_entry = entry.clone();
+                    let state_for_click = Arc::clone(&state_for_agent_rows);
+                    let presence_dir_for_click = presence_dir.clone();
                     div()
                         .flex()
                         .flex_col()
@@ -783,6 +1094,20 @@ impl LayoutHook for HerdrPlugin {
                         .bg(accent.opacity(0.10))
                         .border_1()
                         .border_color(accent.opacity(0.28))
+                        .cursor_pointer()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_event, window: &mut Window, _cx| {
+                                // Sin identidad de sesión no hay nada que seguir.
+                                if request_watch(
+                                    &state_for_click,
+                                    &presence_dir_for_click,
+                                    &row_entry,
+                                ) {
+                                    window.refresh();
+                                }
+                            },
+                        )
                         .child(
                             div()
                                 .flex()
@@ -831,10 +1156,7 @@ impl LayoutHook for HerdrPlugin {
                             div()
                                 .text_size(px(10.0))
                                 .text_color(rgb(0x6e7681))
-                                .child(format!(
-                                    "{} turns · {} tools",
-                                    entry.turns, entry.tool_calls
-                                )),
+                                .child(clip_last_step(&entry.last_step)),
                         )
                 })
                 .collect::<Vec<_>>()
@@ -1077,39 +1399,37 @@ impl LayoutHook for HerdrPlugin {
                         })
                         .child(">"),
                 )
-                .child(match tab.app.as_ref() {
+                .child(match tab_identity(tab) {
                     // Hay un programa en primer plano: icono Nerd Font + nombre legible
-                    Some(app) => {
-                        let (icon, label) = app_identity(app);
-                        div()
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .text_color(accent)
-                                    .child(icon.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .text_size(px(12.0))
-                                    .font_weight(if is_active {
-                                        FontWeight::BOLD
-                                    } else {
-                                        FontWeight::NORMAL
-                                    })
-                                    .text_color(if is_active {
-                                        rgb(0xf0f6fc)
-                                    } else {
-                                        rgb(0x8b949e)
-                                    })
-                                    .child(label),
-                            )
-                    }
-                    // Terminal en reposo: se muestra la carpeta de la sesión
-                    None => div()
+                    (Some(icon), label) => div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(6.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(accent)
+                                .child(icon.to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(if is_active {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                })
+                                .text_color(if is_active {
+                                    rgb(0xf0f6fc)
+                                } else {
+                                    rgb(0x8b949e)
+                                })
+                                .child(label),
+                        ),
+                    // Terminal en reposo o título fijado por el plugin: el texto
+                    // de la pestaña (nombre del subagente en el visor).
+                    (None, label) => div()
                         .text_size(px(12.0))
                         .font_weight(if is_active {
                             FontWeight::BOLD
@@ -1121,7 +1441,7 @@ impl LayoutHook for HerdrPlugin {
                         } else {
                             rgb(0x8b949e)
                         })
-                        .child(tab.title.clone()),
+                        .child(label),
                 })
                 .child(
                     div()
@@ -1178,6 +1498,8 @@ impl LayoutHook for HerdrPlugin {
                             title: format!("term {}", sp.tabs.len() + 1),
                             session_id: 0,
                             app: None,
+                            title_locked: false,
+                            watching: None,
                         });
                         sp.active_tab_index = sp.tabs.len() - 1;
                         s.new_session_requested = true;
@@ -1207,6 +1529,13 @@ impl LayoutHook for HerdrPlugin {
 
 impl InputHook for HerdrPlugin {
     fn on_key(&self, key: &Key) -> KeyAction {
+        // Escape sin modificadores: salir del visor de la pestaña activa. En una
+        // pestaña normal la tecla sigue su curso hacia el PTY.
+        if !key.ctrl && !key.alt && !key.shift && key.key == "Escape" && self.request_viewer_close()
+        {
+            return KeyAction::Consume;
+        }
+
         // Ctrl + Shift + T: crear nueva pestaña de terminal en el espacio activo
         if key.ctrl && key.shift && !key.alt && key.key.to_lowercase() == "t" {
             self.create_tab_in_active_space();
@@ -1239,12 +1568,12 @@ impl InputHook for HerdrPlugin {
             return KeyAction::Consume;
         }
 
-        // Ctrl + W: cerrar pestaña activa en el espacio actual
+        // Ctrl + W: cerrar el visor activo o, si no lo hay, la pestaña activa.
         if key.ctrl
             && !key.alt
             && !key.shift
             && key.key.to_lowercase() == "w"
-            && self.close_active_tab()
+            && (self.request_viewer_close() || self.close_active_tab())
         {
             return KeyAction::Consume;
         }
@@ -1327,6 +1656,8 @@ impl Plugin for HerdrPlugin {
                                 title: "terminal".to_string(),
                                 session_id: idx,
                                 app: None,
+                                title_locked: false,
+                                watching: None,
                             }],
                             active_tab_index: 0,
                         });
@@ -1360,6 +1691,22 @@ impl Plugin for HerdrPlugin {
 mod tests {
     use super::*;
 
+    /// Presencia vacía aislada del disco real.
+    ///
+    /// Con la ruta real, un subagente vivo en esta máquina abriría la barra y
+    /// los tests que esperan una terminal limpia fallarían sin que nada en el
+    /// código hubiera cambiado.
+    fn empty_presence(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-vacio-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("crear presencia vacia");
+        dir
+    }
+
     #[test]
     fn parse_hex_color_valid() {
         assert_eq!(parse_hex_color("#325573"), Some(Rgb::new(0x32, 0x55, 0x73)));
@@ -1369,17 +1716,9 @@ mod tests {
 
     #[test]
     fn herdr_opens_clean_terminal_by_default() {
-        // Con un directorio de tasks vacio, sin subagentes que forzar la barra.
-        // Con la ruta real, un subagente recien terminado en esta maquina
-        // abría la sidebar y el test diria que la terminal no es limpia sin
-        // que nada en el codigo hubiera cambiado.
-        let vacio = std::env::temp_dir().join(format!(
-            "herdr-vacio-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&vacio);
-        let plugin = HerdrPlugin::with_tasks_dir(&vacio);
+        // Presencia vacía: sin subagentes que fuercen la barra.
+        let presence = empty_presence("limpio");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
         assert_eq!(plugin.id(), "herdr");
         assert_eq!(plugin.name(), "Herdr Customization Plugin");
         // Al abrir la terminal por defecto es limpia: sin sidebar ni topbar
@@ -1425,7 +1764,10 @@ mod tests {
 
     #[test]
     fn ctrl_alt_t_creates_space_and_opens_sidebar() {
-        let plugin = HerdrPlugin::default();
+        // Presencia aislada: el test espera una terminal limpia al empezar, y
+        // con la presencia real un subagente vivo ya habría abierto la barra.
+        let presence = empty_presence("ctrl-alt-t");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
         assert_eq!(plugin.left_sidebar_width(), 0.0);
 
         // Pulsamos Ctrl+Alt+T
@@ -1647,5 +1989,415 @@ mod tests {
         let s = plugin.state.read().unwrap();
         assert_eq!(s.spaces[0].tabs[1].app, Some(app));
         assert_eq!(s.spaces[0].tabs[0].app, None);
+    }
+
+    // ── Visor por clic ─────────────────────────────────────────────────────
+
+    const WATCH_HASH: &str = "5ad9a04398e3b840b64c906d0f794d3d17a140ed3ada1a0bbcded38b16de3ccc";
+    const WATCH_INCARNATION: &str = "81a8a249-55b7-4b19-bddd-f1db0fb2dd69";
+
+    /// Presencia viva con una tarea, en un directorio temporal.
+    ///
+    /// No hay ningún `tasks/<id>.json`: la identidad y el paso salen de la
+    /// presencia, que es la única fuente que existe mientras el subagente corre.
+    /// Devuelve la ruta de presencia que espera el plugin.
+    fn seed_watch_agent(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "herdr-viewer-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let presence = root.join("gentle-agents").join("presence");
+        std::fs::create_dir_all(&presence).expect("crear presencia");
+
+        let now = agents::now_ms();
+        let header = format!(
+            "{{\"schema\":1,\"sessionHash\":\"{WATCH_HASH}\",\"incarnation\":\"{WATCH_INCARNATION}\",\"label\":\"sesion de prueba\",\"heartbeat\":{now},\"generation\":1,\"unavailable\":null}}"
+        );
+        std::fs::write(
+            presence.join(format!("{WATCH_HASH}.{WATCH_INCARNATION}.header.json")),
+            header,
+        )
+        .expect("escribir header");
+        let activity = format!(
+            "{{\"schema\":1,\"sessionHash\":\"{WATCH_HASH}\",\"incarnation\":\"{WATCH_INCARNATION}\",\"generation\":1,\"activity\":{{\"tasks\":[{{\"summary\":{{\"id\":\"t_abc123\",\"agent\":\"gentle-ai-worker\",\"label\":\"herdr viewer\",\"status\":\"running\",\"lastStep\":\"reading the presence\",\"createdAt\":1,\"startedAt\":2,\"endedAt\":null,\"lastActivityAt\":{now}}}}}]}}}}"
+        );
+        std::fs::write(
+            presence.join(format!("{WATCH_HASH}.{WATCH_INCARNATION}.activity.json")),
+            activity,
+        )
+        .expect("escribir actividad");
+
+        presence
+    }
+
+    #[test]
+    fn el_ultimo_paso_se_recorta_a_ochenta_caracteres() {
+        assert_eq!(
+            clip_last_step("  reading   the  presence "),
+            "reading the presence",
+            "una sola línea, sin extremos"
+        );
+        let largo = "a".repeat(120);
+        let corto = clip_last_step(&largo);
+        assert_eq!(corto.chars().count(), AGENT_STEP_MAX_CHARS + 1);
+        assert!(corto.ends_with('…'), "se corta con elipsis");
+        assert!(!clip_last_step("queued").ends_with('…'));
+    }
+
+    #[test]
+    fn con_un_subagente_vivo_la_sidebar_reserva_su_ancho() {
+        let presence = seed_watch_agent("ancho");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+        assert_eq!(
+            plugin.state.read().unwrap().spaces.len(),
+            1,
+            "el caso que fallaba es el de un solo espacio"
+        );
+        // La barra se pinta, así que tiene que reservar ancho. Sin este ancho
+        // PORT la dibuja fuera de la caja del layout: se ve, pero ninguna de sus
+        // filas recibe el clic (el ancho y el dibujo tienen que coincidir).
+        assert!(
+            plugin.left_sidebar_width() > 0.0,
+            "una sidebar visible tiene que reservar su ancho"
+        );
+        assert!(plugin.left_sidebar().is_some());
+    }
+
+    #[test]
+    fn hacer_clic_en_un_subagente_ocupa_la_pestana_activa_sin_crear_nada() {
+        let presence = seed_watch_agent("clic");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+        // La fila visible es la que el clic sigue.
+        let entry = plugin
+            .visible_agents(1)
+            .into_iter()
+            .next()
+            .expect("un subagente visible");
+        assert_eq!(entry.session_hash, WATCH_HASH);
+        assert_eq!(entry.incarnation, WATCH_INCARNATION);
+        assert_eq!(entry.last_step, "reading the presence");
+        let expected_label = entry.label.clone();
+        assert_eq!(expected_label, "herdr viewer");
+
+        let (espacios_antes, pestanas_antes, id_antes, titulo_antes) = {
+            let s = plugin.state.read().unwrap();
+            let space = &s.spaces[0];
+            (
+                s.spaces.len(),
+                space.tabs.len(),
+                space.tabs[0].id,
+                space.tabs[0].title.clone(),
+            )
+        };
+        assert!(plugin.watch_entry(&entry));
+
+        // El clic no crea nada: mismo espacio, misma pestaña, mismo id.
+        {
+            let s = plugin.state.read().unwrap();
+            assert_eq!(
+                s.spaces.len(),
+                espacios_antes,
+                "el visor no crea un espacio"
+            );
+            assert_eq!(s.active_space_index, 0, "seguimos en el espacio activo");
+            let space = &s.spaces[s.active_space_index];
+            assert_eq!(
+                space.tabs.len(),
+                pestanas_antes,
+                "el visor no agrega pestañas"
+            );
+            assert_eq!(
+                space.active_tab_index, 0,
+                "la pestaña activa es la de siempre"
+            );
+            let tab = &space.tabs[0];
+            assert_eq!(tab.id, id_antes, "la pestaña conserva su identidad");
+            // Aún no existe la sesión del visor: la pestaña sigue mostrando el
+            // terminal original, pero ya guarda lo necesario para volver a él.
+            assert_eq!(tab.session_id, 0, "el terminal original sigue a la vista");
+            let previo = tab.watching.as_ref().expect("la pestaña apunta al visor");
+            assert_eq!(previo.session_id, 0, "se guardó la sesión original");
+            assert_eq!(previo.title, titulo_antes, "se guardó el título original");
+            assert!(!previo.title_locked, "se guardó el bloqueo original");
+            assert_eq!(
+                s.pending_watch
+                    .as_ref()
+                    .expect("la petición del visor")
+                    .agent_label,
+                expected_label,
+                "la petición lleva la etiqueta del subagente"
+            );
+            // El resto del espacio conserva su terminal de siempre.
+            assert_eq!(space.name, "space-1");
+        }
+        assert!(
+            !plugin.take_new_session_request(),
+            "el visor nunca pide un shell por defecto"
+        );
+
+        // El núcleo consume la petición una sola vez: el comando lleva la
+        // identidad de la sesión y el directorio de presencia, no una ruta de
+        // registro.
+        let config = plugin
+            .take_spawn_session_request()
+            .expect("el clic debe pedir una sesión de visor");
+        assert_eq!(config.command, "bash");
+        assert_eq!(config.args[2], "herdr-view");
+        assert_eq!(config.args[3], presence.display().to_string());
+        assert_eq!(config.args[4], WATCH_HASH);
+        assert_eq!(config.args[5], WATCH_INCARNATION);
+        assert_eq!(config.args[6], expected_label);
+        assert!(
+            plugin.take_spawn_session_request().is_none(),
+            "una petición de visor se consume una sola vez"
+        );
+    }
+
+    #[test]
+    fn crear_la_sesion_del_visor_enlaza_la_pestana_activa_y_bloquea_su_titulo() {
+        let presence = seed_watch_agent("enlace");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+        let entry = plugin
+            .visible_agents(1)
+            .into_iter()
+            .next()
+            .expect("un subagente visible");
+        let expected_label = entry.label.clone();
+        assert!(plugin.watch_entry(&entry));
+        assert!(plugin.take_spawn_session_request().is_some());
+
+        // El núcleo crea la sesión del visor: la MISMA pestaña activa toma su id
+        // y la etiqueta del subagente, y queda con el título bloqueado.
+        plugin.on_session_created(7);
+        {
+            let s = plugin.state.read().unwrap();
+            let space = &s.spaces[0];
+            assert_eq!(space.tabs.len(), 1, "no aparece ninguna pestaña nueva");
+            let tab = &space.tabs[0];
+            assert_eq!(
+                tab.session_id, 7,
+                "la pestaña activa pasa a mostrar el visor"
+            );
+            assert_eq!(tab.title, expected_label, "el título ES el subagente");
+            assert!(tab.title_locked, "la pestaña del visor no se renombra");
+            assert_eq!(
+                tab.watching
+                    .as_ref()
+                    .expect("sigue apuntando al original")
+                    .session_id,
+                0,
+                "el terminal original sigue guardado para volver a él"
+            );
+            assert!(s.pending_viewer_title.is_none(), "la etiqueta se agota");
+        }
+        // El área principal dibuja solo el visor desde que su sesión existe.
+        assert_eq!(
+            plugin.active_session(),
+            7,
+            "el núcleo dibuja la sesión del visor, no la del terminal original"
+        );
+    }
+
+    #[test]
+    fn cerrar_la_sesion_del_visor_restaura_el_terminal_original() {
+        let presence = seed_watch_agent("restaura");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+        // Título original no trivial: la restauración tiene que devolverlo tal cual.
+        plugin.state.write().unwrap().spaces[0].tabs[0].title = "mi terminal".to_string();
+
+        let entry = plugin
+            .visible_agents(1)
+            .into_iter()
+            .next()
+            .expect("un subagente visible");
+        assert!(plugin.watch_entry(&entry));
+        assert!(plugin.take_spawn_session_request().is_some());
+        plugin.on_session_created(7);
+
+        plugin.on_session_closed(7);
+
+        let s = plugin.state.read().unwrap();
+        assert_eq!(
+            s.spaces.len(),
+            1,
+            "el espacio no se borra al salir del visor"
+        );
+        let space = &s.spaces[0];
+        assert_eq!(space.tabs.len(), 1, "la pestaña se restaura, no se cierra");
+        let tab = &space.tabs[0];
+        assert_eq!(tab.session_id, 0, "vuelve el terminal original");
+        assert_eq!(tab.title, "mi terminal", "vuelve el título original");
+        assert!(!tab.title_locked, "vuelve el bloqueo original");
+        assert!(
+            tab.watching.is_none(),
+            "la pestaña deja de apuntar al visor"
+        );
+    }
+
+    #[test]
+    fn escape_y_ctrl_w_en_el_visor_piden_cerrar_su_sesion() {
+        let presence = seed_watch_agent("salida");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+        let entry = plugin
+            .visible_agents(1)
+            .into_iter()
+            .next()
+            .expect("un subagente visible");
+        assert!(plugin.watch_entry(&entry));
+        assert!(plugin.take_spawn_session_request().is_some());
+        plugin.on_session_created(7);
+
+        // Escape sin modificadores pide cerrar la sesión del visor y consume.
+        assert_eq!(plugin.on_key(&Key::new("Escape")), KeyAction::Consume);
+        assert_eq!(plugin.take_close_session_request(), Some(7));
+        assert!(
+            plugin.state.read().unwrap().spaces[0].tabs[0]
+                .watching
+                .is_some(),
+            "la pestaña no se borra: solo se pide cerrar la sesión del visor"
+        );
+
+        // Ctrl+W hace exactamente lo mismo, nunca borra la pestaña del usuario.
+        assert_eq!(plugin.on_key(&Key::new("w").ctrl()), KeyAction::Consume);
+        assert_eq!(plugin.take_close_session_request(), Some(7));
+        assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+
+        // close_active_tab tampoco borra una pestaña ocupada por el visor.
+        assert!(plugin.close_active_tab());
+        assert_eq!(plugin.take_close_session_request(), Some(7));
+        assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+
+        // Escape con modificadores no es la salida del visor.
+        assert_eq!(plugin.on_key(&Key::new("Escape").ctrl()), KeyAction::Pass);
+        assert!(plugin.take_close_session_request().is_none());
+    }
+
+    #[test]
+    fn los_atajos_normales_de_pestana_no_cambian() {
+        let plugin = HerdrPlugin::default();
+        // Escape en una pestaña normal sigue su curso hacia el PTY.
+        assert_eq!(plugin.on_key(&Key::new("Escape")), KeyAction::Pass);
+        // Ctrl+W sigue cerrando la pestaña activa cuando hay más de una.
+        plugin.create_tab_in_active_space();
+        plugin.on_session_created(1);
+        assert_eq!(plugin.on_key(&Key::new("w").ctrl()), KeyAction::Consume);
+        assert_eq!(plugin.take_close_session_request(), Some(1));
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs.len(), 1, "la pestaña normal sí se cierra");
+        assert_eq!(s.spaces[0].tabs[0].session_id, 0);
+    }
+
+    #[test]
+    fn una_fila_sin_identidad_no_pide_visor() {
+        let presence = seed_watch_agent("sin-identidad");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+        // La presencia siempre trae identidad; se fuerza una fila sin ella para
+        // ejercitar la guarda del clic.
+        let entry = agents::AgentEntry {
+            id: "t_huerfana".to_string(),
+            agent: "gentle-ai-worker".to_string(),
+            label: "huerfana".to_string(),
+            status: agents::AgentStatus::Running,
+            last_activity_at: 1,
+            last_step: String::new(),
+            session_hash: String::new(),
+            incarnation: String::new(),
+        };
+        assert!(
+            !plugin.watch_entry(&entry),
+            "sin identidad no hay nada que ver"
+        );
+        assert!(
+            plugin.take_spawn_session_request().is_none(),
+            "sin identidad no se pide sesión"
+        );
+        assert_eq!(
+            plugin.state.read().unwrap().spaces[0].tabs.len(),
+            1,
+            "tampoco se crea una pestaña vacía"
+        );
+    }
+
+    #[test]
+    fn el_directorio_y_la_app_del_visor_no_tocan_la_pestana_ocupada() {
+        let presence = seed_watch_agent("titulo");
+        let plugin = HerdrPlugin::with_presence_dir(&presence);
+        let entry = plugin
+            .visible_agents(1)
+            .into_iter()
+            .next()
+            .expect("un subagente visible");
+        let expected_label = entry.label.clone();
+        assert!(plugin.watch_entry(&entry));
+        assert!(plugin.take_spawn_session_request().is_some());
+        plugin.on_session_created(7);
+
+        // El shell del visor informa su carpeta y su app: ni el espacio del
+        // usuario se renombra ni la pestaña ocupada pierde el nombre del subagente.
+        plugin.update_session_cwd(7, Path::new("/home/loonbac/Proyectos/port"), "port");
+        plugin.update_session_app(
+            7,
+            Some(&RunningApp {
+                pid: 1,
+                bin: "bash".to_string(),
+            }),
+        );
+
+        let s = plugin.state.read().unwrap();
+        let space = &s.spaces[0];
+        assert_eq!(
+            space.name, "space-1",
+            "el cwd de la sesión visora no renombra el espacio del usuario"
+        );
+        let tab = &space.tabs[0];
+        assert_eq!(
+            tab.title, expected_label,
+            "el título bloqueado sigue siendo el subagente"
+        );
+        assert_eq!(tab.app, None, "la app del visor no sustituye al subagente");
+        drop(s);
+
+        // Un terminal normal (sin visor) sí sigue renombrando su espacio.
+        let normal = HerdrPlugin::default();
+        normal.update_session_cwd(0, Path::new("/home/loonbac/Proyectos/port"), "port");
+        assert_eq!(normal.state.read().unwrap().spaces[0].name, "port");
+    }
+
+    #[test]
+    fn la_pestana_con_titulo_bloqueado_ignora_la_app_en_primer_plano() {
+        // Regresión de "Sleep": el visor corre `bash -c tail|jq`, así que su
+        // app en primer plano no debe sustituir el nombre del subagente que
+        // pinta la píldora de la barra superior.
+        let bloqueada = HerdrTab {
+            id: 1,
+            title: "Sleep".to_string(),
+            session_id: 7,
+            app: Some(RunningApp {
+                pid: 1,
+                bin: "bash".to_string(),
+            }),
+            title_locked: true,
+            watching: None,
+        };
+        assert_eq!(
+            tab_identity(&bloqueada),
+            (None, "Sleep".to_string()),
+            "el título fijado manda sobre la app en primer plano"
+        );
+
+        // Una pestaña normal conserva icono y nombre derivados de su app.
+        let normal = HerdrTab {
+            title_locked: false,
+            ..bloqueada.clone()
+        };
+        assert_eq!(
+            tab_identity(&normal),
+            (Some(ICON_ROBOT), "Bash".to_string())
+        );
     }
 }
