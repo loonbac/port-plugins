@@ -3879,7 +3879,7 @@ dependencies = [
 name = "port-plugin-font"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.4)",
+ "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.5)",
  "serde_json",
 ]
 
@@ -3887,7 +3887,7 @@ dependencies = [
 name = "port-plugin-font-zoom"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.4)",
+ "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.5)",
  "serde_json",
 ]
 
@@ -3912,10 +3912,18 @@ dependencies = [
 [[package]]
 name = "port-plugin-sdk"
 version = "0.1.2"
-source = "git+https://github.com/loonbac/port.git?tag=v0.1.4#ab14c140de6f5a8901c9debc17c79c01bb771143"
+source = "git+https://github.com/loonbac/port.git?tag=v0.1.5#75b10a06fc3be438b822215c2b9f7b30b644827a"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "port-plugin-selection"
+version = "0.1.0"
+dependencies = [
+ "port-plugin-api",
+ "port-term-core",
 ]
 
 [[package]]
@@ -3930,7 +3938,7 @@ dependencies = [
 name = "port-plugin-transparency"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.4)",
+ "port-plugin-sdk 0.1.2 (git+https://github.com/loonbac/port.git?tag=v0.1.5)",
  "serde_json",
 ]
 

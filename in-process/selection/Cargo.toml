@@ -1,0 +1,10 @@
+[package]
+name = "port-plugin-selection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "PORT Plugin: política de ratón y selección (reenvío de gestos, copia al seleccionar y resaltado)"
+
+[dependencies]
+port-plugin-api = { workspace = true }
+port-term-core = { workspace = true }

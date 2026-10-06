@@ -46,6 +46,7 @@ Para activar o desactivar un plugin, abre el menú de plugins de PORT con
 | `herdr` | Herdr Customization Plugin | Gestor de espacios: barra lateral ajustable, barra de pestañas, detección en vivo del programa y nombre a partir del directorio actual y la rama de Git. | en proceso | `AppearanceHook`, `InputHook`, `LayoutHook`, `SpaceHook` | — (recompilar PORT) |
 | `shortcuts` | Custom Shortcuts | Asocia combinaciones de teclas a callbacks y a servicios publicados por otros plugins. | en proceso | `InputHook` | — (recompilar PORT) |
 | `close-guard` | Close Guard | Pide confirmación antes de cerrar la ventana si hay programas en ejecución. | en proceso | `LifecycleHook` | — (recompilar PORT) |
+| `selection` | Selection | Es dueño de la política de ratón y selección: reenvía clics, arrastres y movimiento al programa, Shift devuelve el gesto a PORT, y controla la copia al soltar, el doble y triple clic y el color del resaltado. | en proceso | `MouseHook` | — (recompilar PORT) |
 
 Para los plugins de tienda la URL de instalación es
 `https://github.com/loonbac/port-plugins/plugins/<id>`.

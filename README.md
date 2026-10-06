@@ -46,6 +46,7 @@ and toggle it there.
 | `herdr` | Herdr Customization Plugin | Workspace manager: resizable sidebar of spaces, tab bar, live program detection and naming from the current directory and Git branch. | in-process | `AppearanceHook`, `InputHook`, `LayoutHook`, `SpaceHook` | — (recompile PORT) |
 | `shortcuts` | Custom Shortcuts | Binds key combinations to callbacks and to services published by other plugins. | in-process | `InputHook` | — (recompile PORT) |
 | `close-guard` | Close Guard | Asks for confirmation before closing the window when programs are running. | in-process | `LifecycleHook` | — (recompile PORT) |
+| `selection` | Selection | Owns the mouse and selection policy: forwards clicks, drags and motion to the program, Shift returns the gesture to PORT, and copy/word/line/highlight on select. | in-process | `MouseHook` | — (recompile PORT) |
 
 For store plugins the install URL is
 `https://github.com/loonbac/port-plugins/plugins/<id>`.
