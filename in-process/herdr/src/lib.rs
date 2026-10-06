@@ -264,6 +264,10 @@ pub struct PendingWatch {
 pub struct HerdrState {
     pub active_space_index: usize,
     pub spaces: Vec<HerdrSpace>,
+    /// Alfa del fondo de la sidebar y el topbar. Por defecto `0.0` (sin fondo
+    /// propio): se ve el fondo de la ventana, igual que en la terminal. La
+    /// transparencia global la decide el plugin de la tienda, no herdr; esta
+    /// opacidad solo añade un tinte opcional encima (diseño de herdr).
     pub opacity: f32,
     pub accent_mode: String,
     pub new_session_requested: bool,
@@ -374,7 +378,9 @@ impl Default for HerdrState {
                 }],
                 active_tab_index: 0,
             }],
-            opacity: 0.85,
+            // Sin fondo propio: la sidebar y el topbar comparten el fondo de
+            // la ventana y su transparencia, como la terminal.
+            opacity: 0.0,
             accent_mode: "auto".to_string(),
             new_session_requested: false,
             close_session_requested: None,
@@ -1168,7 +1174,8 @@ impl LayoutHook for HerdrPlugin {
                 .collect::<Vec<_>>()
         };
 
-        // Sidebar con fondo idéntico al de la terminal y compartiendo su opacidad
+        // Fondo de la sidebar: con `opacity` en 0 (default) no pinta nada y
+        // se ve el fondo de la ventana, idéntico al de la terminal.
         let width = state_sidebar_width;
         let resizing = state_is_resizing;
         let sidebar = div()
@@ -1734,6 +1741,8 @@ mod tests {
         assert!(plugin.top_bar().is_none());
         // herdr no aporta opacidad global: la decide el plugin de la tienda.
         assert_eq!(plugin.opacity(), None);
+        // Sin fondo propio: la sidebar comparte el fondo de la ventana.
+        assert_eq!(plugin.state.read().unwrap().opacity, 0.0);
     }
 
     #[test]
