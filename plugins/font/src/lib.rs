@@ -2,15 +2,27 @@
 //!
 //! Permite personalizar la familia de fuente, el tamaño y las fuentes
 //! de respaldo preferidas (ej. Nerd Fonts para iconos).
+//!
+//! Corre como proceso independiente: PORT lo arranca, lee su saludo y le
+//! envía la configuración por el protocolo JSON Lines del SDK.
 
-use std::path::Path;
-use std::sync::RwLock;
+use std::collections::BTreeMap;
 
-use port_plugin_api::{AppearanceHook, ConfigFile, Plugin, PluginConfig};
+use port_plugin_sdk::protocol::{Appearance, Capability};
+use port_plugin_sdk::runtime::Plugin;
+
+/// Identificador con el que PORT registra el plugin.
+///
+/// Debe coincidir con `[package.metadata.port] id` del `Cargo.toml`; la prueba
+/// de contrato lo comprueba leyendo el manifiesto.
+pub const PLUGIN_ID: &str = "font";
+
+/// Familia tipográfica por defecto, la misma que asume PORT sin plugins.
+pub const DEFAULT_FAMILY: &str = "FiraCode Nerd Font Mono";
 
 /// Plugin para configurar la tipografía de la terminal.
 pub struct FontPlugin {
-    family: RwLock<String>,
+    family: String,
     size: Option<f32>,
     fallbacks: Option<Vec<String>>,
 }
@@ -19,7 +31,7 @@ impl FontPlugin {
     /// Crea un nuevo plugin con la familia de fuente indicada (ej. "FiraCode Nerd Font Mono").
     pub fn new(family: impl Into<String>) -> Self {
         Self {
-            family: RwLock::new(family.into()),
+            family: family.into(),
             size: None,
             fallbacks: None,
         }
@@ -37,67 +49,81 @@ impl FontPlugin {
         self
     }
 
-    /// Guarda la configuración actual en una ruta concreta.
-    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(config) = self.save_config() {
-            ConfigFile::save_plugin(path, self.id(), &config)?;
-        }
-        Ok(())
+    /// Asigna la familia tipográfica activa.
+    pub fn set_family(&mut self, family: impl Into<String>) {
+        self.family = family.into();
     }
 
-    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
-    pub fn save_to_default_file(&self) -> std::io::Result<()> {
-        self.save_to_file(&ConfigFile::default_path())
-    }
-}
-
-impl AppearanceHook for FontPlugin {
-    fn font_family(&self) -> Option<String> {
-        Some(self.family.read().unwrap().clone())
+    /// Asigna el tamaño de fuente activo.
+    pub fn set_size(&mut self, size: f32) {
+        self.size = Some(size);
     }
 
-    fn font_size(&self) -> Option<f32> {
+    /// Familia tipográfica actual, con la forma que espera la apariencia.
+    pub fn font_family(&self) -> Option<String> {
+        Some(self.family.clone())
+    }
+
+    /// Tamaño de fuente actual, si se declaró.
+    pub fn font_size(&self) -> Option<f32> {
         self.size
     }
 
-    fn font_fallbacks(&self) -> Option<Vec<String>> {
+    /// Fuentes de respaldo declaradas, si las hay.
+    ///
+    /// El protocolo externo todavía no tiene un campo para las fuentes de
+    /// respaldo dentro de [`Appearance`]; el valor se conserva aquí para no
+    /// perderlo y la prueba de contrato lo cubre.
+    pub fn font_fallbacks(&self) -> Option<Vec<String>> {
         self.fallbacks.clone()
+    }
+
+    /// Identificador del plugin, para las pruebas de contrato.
+    pub fn id(&self) -> &'static str {
+        PLUGIN_ID
+    }
+}
+
+impl Default for FontPlugin {
+    fn default() -> Self {
+        Self::new(DEFAULT_FAMILY)
     }
 }
 
 impl Plugin for FontPlugin {
-    fn id(&self) -> &'static str {
-        "font"
-    }
-
     fn name(&self) -> &'static str {
         "Font Configuration"
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        env!("CARGO_PKG_VERSION")
     }
 
-    fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
-        Some(self)
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::Appearance]
     }
 
-    fn default_config(&self) -> Option<PluginConfig> {
-        let mut cfg = PluginConfig::new();
-        cfg.set("family", self.family.read().unwrap().clone());
-        Some(cfg)
-    }
-
-    fn load_config(&self, config: &PluginConfig) {
-        if let Some(family) = config.get("family") {
-            *self.family.write().unwrap() = family.to_string();
+    fn appearance(&self) -> Appearance {
+        Appearance {
+            font_family: Some(self.family.clone()),
+            font_size: self.size,
+            ..Default::default()
         }
     }
 
-    fn save_config(&self) -> Option<PluginConfig> {
-        let mut cfg = PluginConfig::new();
-        cfg.set("family", self.family.read().unwrap().clone());
-        Some(cfg)
+    /// El núcleo todavía no empuja la configuración a los plugins externos;
+    /// cuando lo haga, este es el punto de entrada. Las claves son las mismas
+    /// que usaba `PluginConfig::get("family")` y `get_f32("size")`.
+    fn configure(&mut self, values: &BTreeMap<String, String>) {
+        if let Some(family) = values.get("family") {
+            self.family = family.to_string();
+        }
+        if let Some(size) = values
+            .get("size")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            self.size = Some(size);
+        }
     }
 }
 
@@ -106,18 +132,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn font_plugin_defaults() {
-        let plugin = FontPlugin::new("FiraCode Nerd Font Mono");
-        assert_eq!(
-            plugin.font_family(),
-            Some("FiraCode Nerd Font Mono".to_string())
-        );
+    fn los_valores_por_defecto_son_la_familia_de_port() {
+        let plugin = FontPlugin::default();
+        assert_eq!(plugin.font_family(), Some(DEFAULT_FAMILY.to_string()));
         assert_eq!(plugin.font_size(), None);
         assert_eq!(plugin.font_fallbacks(), None);
     }
 
     #[test]
-    fn font_plugin_with_options() {
+    fn las_opciones_construyen_el_plugin() {
         let plugin = FontPlugin::new("JetBrainsMono Nerd Font Mono")
             .with_size(15.0)
             .with_fallbacks(vec!["Symbols Nerd Font Mono".to_string()]);
@@ -134,11 +157,34 @@ mod tests {
     }
 
     #[test]
-    fn font_config_load_and_save() {
-        let plugin = FontPlugin::new("FiraCode Nerd Font Mono");
-        let mut cfg = PluginConfig::new();
-        cfg.set("family", "DejaVu Sans Mono");
-        plugin.load_config(&cfg);
+    fn la_configuracion_aplica_familia_y_tamano() {
+        let mut plugin = FontPlugin::default();
+        let mut values = BTreeMap::new();
+        values.insert("family".to_string(), "DejaVu Sans Mono".to_string());
+        values.insert("size".to_string(), "13.5".to_string());
+        plugin.configure(&values);
         assert_eq!(plugin.font_family(), Some("DejaVu Sans Mono".to_string()));
+        assert_eq!(plugin.font_size(), Some(13.5));
+    }
+
+    #[test]
+    fn un_tamano_invalido_no_cambia_el_tamano() {
+        let mut plugin = FontPlugin::default().with_size(14.0);
+        let mut values = BTreeMap::new();
+        values.insert("size".to_string(), "grande".to_string());
+        plugin.configure(&values);
+        assert_eq!(plugin.font_size(), Some(14.0));
+    }
+
+    #[test]
+    fn el_plugin_declara_apariencia_e_identidad() {
+        let plugin = FontPlugin::default().with_size(14.0);
+        assert_eq!(plugin.id(), PLUGIN_ID);
+        assert_eq!(plugin.name(), "Font Configuration");
+        assert_eq!(plugin.capabilities(), vec![Capability::Appearance]);
+
+        let appearance = plugin.appearance();
+        assert_eq!(appearance.font_family, Some(DEFAULT_FAMILY.to_string()));
+        assert_eq!(appearance.font_size, Some(14.0));
     }
 }

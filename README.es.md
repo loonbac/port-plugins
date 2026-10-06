@@ -1,60 +1,101 @@
-# PORT Plugins · Plugins de PORT
+# PORT Plugins · Tienda
 
 [English](README.md)
 
-Plugins oficiales y comunitarios de
-[PORT](https://github.com/loonbac/port), un emulador de terminal orientado a
-plugins escrito en Rust sobre GPUI.
+Tienda de plugins de [PORT](https://github.com/loonbac/port), un emulador de
+terminal orientado a plugins escrito en Rust sobre GPUI.
 
-Los plugins viven en su propio repositorio para que el núcleo de la terminal y
-sus extensiones evolucionen de forma independiente. Un plugin es un crate de Rust
-en el mismo proceso que depende de `port-plugin-api` e implementa uno o más
-hooks.
+Este repositorio guarda dos clases de plugins:
 
-## Plugins disponibles
+- `plugins/<id>/` — plugins de **tienda**. Cada uno es un binario independiente
+  que solo enlaza el SDK; `port plugin add` lo instala sin recompilar PORT.
+- `in-process/<id>/` — plugins que usan features en proceso (widgets GPUI, hooks
+  en caliente, el protocolo de cierre). PORT debe recompilarse con ellos; no se
+  instalan desde la tienda.
 
-### `transparency`
+## Store · Tienda
 
-Opacidad del fondo de la ventana para transparencias a nivel de compositor en
-Wayland.
+### Instalar un plugin
 
-```rust
-use port_plugin_transparency::TransparencyPlugin;
-registry.register(TransparencyPlugin::default()); // 85 %
+```bash
+# Desde el repositorio (la forma de tienda).
+port plugin add https://github.com/loonbac/port-plugins/plugins/font-zoom
+
+# Desde un checkout local, mientras se desarrolla.
+port plugin add /ruta/port-plugins/plugins/font-zoom
 ```
 
-### `font`
+La primera instalación compila el plugin en la máquina anfitriona
+(`cargo build --release`), así que necesita un toolchain de Rust. Instalarlo de
+nuevo lo recompila y lo reemplaza: actualizar y reinstalar son la misma
+operación.
 
-Familia, tamaño y lista de fuentes de respaldo, declarados como configuración y
-no como valores fijos.
+Los plugins instalados viven en `~/.local/share/port/plugins/<id>`, cada uno
+junto a un manifiesto que guarda su origen y las capacidades que anunció.
 
-```rust
-use port_plugin_font::FontPlugin;
-registry.register(FontPlugin::new("FiraCode Nerd Font Mono"));
-```
+Para activar o desactivar un plugin, abre el menú de plugins de PORT con
+`Ctrl+Shift+L` y cámbialo ahí.
+
+### Catálogo
+
+| id | Nombre | Qué hace | Tipo | Capacidades | Instalación |
+|---|---|---|---|---|---|
+| `transparency` | Transparency | Opacidad del fondo de la ventana para transparencias a nivel de compositor en Wayland. | tienda | `appearance` | `port plugin add …/plugins/transparency` |
+| `font` | Font Configuration | Familia, tamaño y lista de fuentes de respaldo. | tienda | `appearance` | `port plugin add …/plugins/font` |
+| `font-zoom` | Font Zoom | Es dueño del tamaño de fuente vigente y de sus atajos (`Ctrl+=`, `Ctrl+-`, `Ctrl+0`). | tienda | `appearance`, `input` | `port plugin add …/plugins/font-zoom` |
+| `herdr` | Herdr Customization Plugin | Gestor de espacios: barra lateral ajustable, barra de pestañas, detección en vivo del programa y nombre a partir del directorio actual y la rama de Git. | en proceso | `AppearanceHook`, `InputHook`, `LayoutHook`, `SpaceHook` | — (recompilar PORT) |
+| `shortcuts` | Custom Shortcuts | Asocia combinaciones de teclas a callbacks y a servicios publicados por otros plugins. | en proceso | `InputHook` | — (recompilar PORT) |
+| `close-guard` | Close Guard | Pide confirmación antes de cerrar la ventana si hay programas en ejecución. | en proceso | `LifecycleHook` | — (recompilar PORT) |
+
+Para los plugins de tienda la URL de instalación es
+`https://github.com/loonbac/port-plugins/plugins/<id>`.
+
+## Por qué algunos plugins van en proceso
+
+La frontera de la tienda es el protocolo JSON Lines, y no todo cabe por ahí:
+
+- **`herdr` dibuja elementos GPUI.** `LayoutHook` devuelve un `AnyElement`, que
+  no tiene forma serializada, así que el layout se queda dentro del proceso.
+- **`shortcuts` es un intermediario de servicios.** Resuelve al pulsar la tecla
+  servicios publicados por otros plugins, y esos servicios son objetos de trait
+  de Rust: no cruzan la frontera del proceso.
+- **`close-guard` necesita una ida y vuelta de confirmación de cierre.** En el
+  protocolo el ciclo de vida es solo `Shutdown`, una notificación, así que el
+  núcleo no puede preguntar a un plugin si la ventana puede cerrarse.
+
+## Referencia de plugins
 
 ### `font-zoom`
 
-Es dueño del tamaño de fuente como estado, y nada más: informa del tamaño actual
-mediante `AppearanceHook` y expone `zoom_in()`, `zoom_out()` y `reset_zoom()`.
+Es dueño del tamaño de fuente como estado y nada más: informa el tamaño actual
+por la capacidad `appearance` y lo maneja por `input`. Los atajos son suyos, así
+que el plugin funciona aunque `shortcuts` no esté cargado.
 
-Deliberadamente **no registra ningún atajo**. Enlazar esas acciones a teclas es
-trabajo del plugin `shortcuts`, así el zoom se puede asociar a otras teclas, o
-dejarlo sin atajo, sin tocar este plugin.
+| Atajo | Acción |
+|---|---|
+| `Ctrl` `=` | Aumentar fuente |
+| `Ctrl` `-` | Reducir fuente |
+| `Ctrl` `0` | Reiniciar tamaño de fuente |
 
-Expone esa capacidad como servicio para que otros plugins puedan manejarla:
+Su bloque de configuración acepta las mismas claves de tamaño que antes más las
+tres plantillas de atajo:
 
-| Servicio | Acción | Devuelve |
-|---|---|---|
-| `font-zoom` | `zoom_in` | Tamaño nuevo |
-| `font-zoom` | `zoom_out` | Tamaño nuevo |
-| `font-zoom` | `reset` | Tamaño base |
-| `font-zoom` | `size` | Tamaño actual |
+```font-zoom
+default_size = 14
+step = 1.0
+min_size = 6.0
+max_size = 72.0
+key_zoom_in = ctrl+=
+key_zoom_out = ctrl+-
+key_reset = ctrl+0
+```
 
 ### `shortcuts`
 
 Asocia combinaciones arbitrarias de teclas a callbacks, con una sintaxis compacta
-tipo `ctrl+shift+t`. Aquí viven todos los atajos de PORT, incluido el zoom:
+tipo `ctrl+shift+t`. Aquí viven los atajos en proceso personalizados. Un atajo
+también puede llamar a un servicio publicado por otro plugin, resuelto al pulsar
+la tecla:
 
 ```rust
 use port_plugin_shortcuts::ShortcutsPlugin;
@@ -64,22 +105,10 @@ let shortcuts = ShortcutsPlugin::new();
 // Su propio atajo.
 shortcuts.bind_str("ctrl+shift+k", || println!("¡Hola!"));
 
-// Manejando el servicio publicado por otro plugin: sin tipos compartidos,
-// se resuelve al pulsar la tecla.
-shortcuts.bind_service("ctrl+=", "font-zoom", "zoom_in");
-shortcuts.bind_service("ctrl+-", "font-zoom", "zoom_out");
-shortcuts.bind_service("ctrl+0", "font-zoom", "reset");
+// Servicio publicado por otro plugin: sin tipos compartidos, se resuelve al
+// pulsar la tecla.
+shortcuts.bind_service("ctrl+shift+p", "some-plugin", "some_action");
 ```
-
-Los bindings que usa la configuración instalada son:
-
-| Atajo | Acción |
-|---|---|
-| `Ctrl` `+` / `Ctrl` `=` | Aumentar fuente |
-| `Ctrl` `+` `Shift` / `Ctrl` `=` `Shift` | Aumentar fuente |
-| `Ctrl` `-` | Reducir fuente |
-| `Ctrl` `0` | Reiniciar tamaño de fuente |
-
 
 ### `herdr`
 
@@ -120,7 +149,7 @@ soporte de teclado y ratón.
 
 ## Hooks
 
-Los plugins implementan uno o más traits de `port-plugin-api`:
+Los plugins en proceso implementan uno o más traits de `port-plugin-api`:
 
 | Hook | Propósito |
 |---|---|
@@ -130,40 +159,30 @@ Los plugins implementan uno o más traits de `port-plugin-api`:
 | `SpaceHook` | Crear, seleccionar y seguir sesiones/pestañas/espacios |
 | `LifecycleHook` | Vetar el cierre de la ventana |
 
-Cada plugin puede además aportar `default_config`, `load_config` y `save_config`
-para persistir sus ajustes en `~/.config/port/config.md`.
-
-## Usar plugins
-
-Añade el plugin a tu `Cargo.toml` y regístralo:
-
-```toml
-[dependencies]
-port-plugin-herdr = { git = "https://github.com/loonbac/port-plugins.git" }
-```
-
-```rust
-use port_plugin_herdr::HerdrPlugin;
-
-fn main() {
-    let mut registry = PluginRegistry::new();
-    registry.register(HerdrPlugin::new());
-}
-```
+Los plugins de tienda no enlazan GPUI ni `port-plugin-api`; declaran los valores
+equivalentes por el protocolo del SDK. Cada plugin puede además aportar
+`default_config`, `load_config` y `save_config` para persistir sus ajustes en
+`~/.config/port/config.md`.
 
 ## Desarrollo
 
 ```bash
-nix-shell      # librerías nativas enlazadas
-cargo test     # 40 tests unitarios
-cargo build --release
+nix-shell                    # librerías nativas enlazadas
+cargo test --workspace       # pruebas unitarias y de protocolo
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 ```
 
 ### Escribir tu propio plugin
 
-Crea un crate con `port-plugin-api` como dependencia, implementa `Plugin` y los
-hooks que necesites, y añádelo al workspace en `Cargo.toml`. El plugin se
-registra desde la aplicación anfitriona; el registro se encarga de la
+Para un plugin de tienda, crea un crate que dependa solo de `port-plugin-sdk`,
+añade un `[[bin]]` y una sección `[package.metadata.port]` con el `id` y las
+`capabilities`, e implementa `port_plugin_sdk::runtime::Plugin`. PORT lo instala
+con `port plugin add`, lo compila una vez y habla con él por el protocolo.
+
+Para un plugin en proceso, añade `port-plugin-api` como dependencia, implementa
+`Plugin` y los hooks que necesites, y agrega el crate a `in-process/*` en el
+workspace. PORT debe recompilarse con él; el registro se encarga entonces de la
 configuración, la activación y la recarga en caliente.
 
 ## Licencia

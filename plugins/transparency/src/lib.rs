@@ -2,22 +2,31 @@
 //!
 //! Controla la opacidad del fondo de la ventana para que compositores
 //! como Niri, Hyprland o Sway muestren el fondo o blur del escritorio.
+//!
+//! Corre como proceso independiente: PORT lo arranca, lee su saludo y le
+//! envía la configuración por el protocolo JSON Lines del SDK.
 
-use std::path::Path;
-use std::sync::RwLock;
+use std::collections::BTreeMap;
 
-use port_plugin_api::{AppearanceHook, ConfigFile, Plugin, PluginConfig};
+use port_plugin_sdk::protocol::{Appearance, Capability};
+use port_plugin_sdk::runtime::Plugin;
+
+/// Identificador con el que PORT registra el plugin.
+///
+/// Debe coincidir con `[package.metadata.port] id` del `Cargo.toml`; la prueba
+/// de contrato lo comprueba leyendo el manifiesto.
+pub const PLUGIN_ID: &str = "transparency";
 
 /// Plugin que define la opacidad del fondo de la terminal.
 pub struct TransparencyPlugin {
-    opacity: RwLock<f32>,
+    opacity: f32,
 }
 
 impl TransparencyPlugin {
     /// Crea una nueva instancia con un nivel de opacidad (0.0 ..= 1.0).
     pub fn new(opacity: f32) -> Self {
         Self {
-            opacity: RwLock::new(opacity.clamp(0.0, 1.0)),
+            opacity: opacity.clamp(0.0, 1.0),
         }
     }
 
@@ -27,21 +36,18 @@ impl TransparencyPlugin {
     }
 
     /// Asigna una nueva opacidad.
-    pub fn set_opacity(&self, opacity: f32) {
-        *self.opacity.write().unwrap() = opacity.clamp(0.0, 1.0);
+    pub fn set_opacity(&mut self, opacity: f32) {
+        self.opacity = opacity.clamp(0.0, 1.0);
     }
 
-    /// Guarda la configuración actual en una ruta concreta.
-    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(config) = self.save_config() {
-            ConfigFile::save_plugin(path, self.id(), &config)?;
-        }
-        Ok(())
+    /// Opacidad actual, con la forma que espera la apariencia del protocolo.
+    pub fn opacity(&self) -> Option<f32> {
+        Some(self.opacity)
     }
 
-    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
-    pub fn save_to_default_file(&self) -> std::io::Result<()> {
-        self.save_to_file(&ConfigFile::default_path())
+    /// Identificador del plugin, para las pruebas de contrato.
+    pub fn id(&self) -> &'static str {
+        PLUGIN_ID
     }
 }
 
@@ -51,45 +57,36 @@ impl Default for TransparencyPlugin {
     }
 }
 
-impl AppearanceHook for TransparencyPlugin {
-    fn opacity(&self) -> Option<f32> {
-        Some(*self.opacity.read().unwrap())
-    }
-}
-
 impl Plugin for TransparencyPlugin {
-    fn id(&self) -> &'static str {
-        "transparency"
-    }
-
     fn name(&self) -> &'static str {
         "Transparency"
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        env!("CARGO_PKG_VERSION")
     }
 
-    fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
-        Some(self)
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::Appearance]
     }
 
-    fn default_config(&self) -> Option<PluginConfig> {
-        let mut cfg = PluginConfig::new();
-        cfg.set("opacity", Self::default_opacity());
-        Some(cfg)
-    }
-
-    fn load_config(&self, config: &PluginConfig) {
-        if let Some(op) = config.get_f32("opacity") {
-            self.set_opacity(op);
+    fn appearance(&self) -> Appearance {
+        Appearance {
+            opacity: Some(self.opacity),
+            ..Default::default()
         }
     }
 
-    fn save_config(&self) -> Option<PluginConfig> {
-        let mut cfg = PluginConfig::new();
-        cfg.set("opacity", *self.opacity.read().unwrap());
-        Some(cfg)
+    /// El núcleo todavía no empuja la configuración a los plugins externos;
+    /// cuando lo haga, este es el punto de entrada. Las claves son las mismas
+    /// que usaba `PluginConfig::get_f32("opacity")`.
+    fn configure(&mut self, values: &BTreeMap<String, String>) {
+        if let Some(opacity) = values
+            .get("opacity")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
+            self.set_opacity(opacity);
+        }
     }
 }
 
@@ -98,7 +95,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transparency_plugin_clamps_opacity() {
+    fn la_opacidad_se_limita_al_rango_valido() {
         let over = TransparencyPlugin::new(1.5);
         assert_eq!(over.opacity(), Some(1.0));
 
@@ -110,19 +107,36 @@ mod tests {
     }
 
     #[test]
-    fn transparency_plugin_metadata() {
+    fn la_opacidad_por_defecto_es_85_por_ciento() {
         let plugin = TransparencyPlugin::default();
-        assert_eq!(plugin.id(), "transparency");
-        assert_eq!(plugin.name(), "Transparency");
-        assert!(plugin.appearance_hook().is_some());
+        assert_eq!(plugin.opacity(), Some(0.85));
+        assert_eq!(TransparencyPlugin::default_opacity(), 0.85);
     }
 
     #[test]
-    fn transparency_config_load_and_save() {
-        let plugin = TransparencyPlugin::default();
-        let mut cfg = PluginConfig::new();
-        cfg.set("opacity", 0.70);
-        plugin.load_config(&cfg);
+    fn la_configuracion_aplica_la_opacidad() {
+        let mut plugin = TransparencyPlugin::default();
+        let mut values = BTreeMap::new();
+        values.insert("opacity".to_string(), "0.70".to_string());
+        plugin.configure(&values);
         assert_eq!(plugin.opacity(), Some(0.70));
+    }
+
+    #[test]
+    fn una_opacidad_invalida_no_cambia_el_valor() {
+        let mut plugin = TransparencyPlugin::default();
+        let mut values = BTreeMap::new();
+        values.insert("opacity".to_string(), "no-es-un-numero".to_string());
+        plugin.configure(&values);
+        assert_eq!(plugin.opacity(), Some(0.85));
+    }
+
+    #[test]
+    fn el_plugin_declara_apariencia_e_identidad() {
+        let plugin = TransparencyPlugin::default();
+        assert_eq!(plugin.id(), PLUGIN_ID);
+        assert_eq!(plugin.name(), "Transparency");
+        assert_eq!(plugin.capabilities(), vec![Capability::Appearance]);
+        assert_eq!(plugin.appearance().opacity, Some(0.85));
     }
 }

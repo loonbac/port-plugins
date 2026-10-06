@@ -5,5 +5,19 @@ edition.workspace = true
 license.workspace = true
 description = "PORT Plugin: Transparencia y opacidad de ventana"
 
+# Cómo se registra el plugin al instalarlo. El `id` y la lista de `capabilities`
+# deben coincidir con lo que declara el binario al saludar; la prueba de
+# contrato lo comprueba.
+[package.metadata.port]
+id = "transparency"
+capabilities = ["appearance"]
+
+[[bin]]
+name = "transparency"
+path = "src/main.rs"
+
 [dependencies]
-port-plugin-api = { workspace = true }
+# Un plugin externo solo enlaza el SDK y serde_json: ni GPUI ni los internos de
+# PORT, para que instalarlo no obligue a recompilar la terminal.
+port-plugin-sdk = { workspace = true }
+serde_json = { workspace = true }

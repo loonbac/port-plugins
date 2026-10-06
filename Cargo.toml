@@ -1,12 +1,11 @@
 [workspace]
 resolver = "2"
+# `plugins/*` son los instalables externos (binario propio, solo el SDK).
+# `in-process/*` son los que necesitan recompilar PORT porque usan features en
+# proceso (GPUI, hooks en caliente, protocolo de cierre).
 members = [
-    "plugins/transparency",
-    "plugins/font",
-    "plugins/font-zoom",
-    "plugins/shortcuts",
-    "plugins/herdr",
-    "plugins/close-guard",
+    "plugins/*",
+    "in-process/*",
 ]
 
 [workspace.package]
@@ -21,6 +20,9 @@ serde_json = "1"
 # coincidir con la API y romper la compilación sin aviso.
 port-term-core = { git = "https://github.com/loonbac/port.git", tag = "v0.1.3" }
 port-plugin-api = { git = "https://github.com/loonbac/port.git", tag = "v0.1.3" }
+# SDK de los plugins que corren como proceso independiente: solo declara el
+# protocolo y el bucle de stdio. Se fija al tag igual que la API in-process.
+port-plugin-sdk = { git = "https://github.com/loonbac/port.git", tag = "v0.1.3" }
 
 [patch."https://github.com/loonbac/port.git"]
 port-term-core = { path = "../port/crates/term-core" }

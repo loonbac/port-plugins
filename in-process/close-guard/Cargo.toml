@@ -7,4 +7,3 @@ description = "PORT Plugin: Pide confirmación antes de cerrar si hay programas 
 
 [dependencies]
 port-plugin-api = { workspace = true }
-gpui = { workspace = true }

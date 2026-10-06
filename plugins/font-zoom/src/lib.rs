@@ -1,41 +1,98 @@
 //! Plugin de zoom de fuente para PORT.
 //!
-//! Solo aporta la **capacidad**: cual es el tamano de fuente vigente, y como
-//! aumentarlo, reducirlo o restablecerlo. No captura ninguna tecla.
+//! Es dueño del tamaño de fuente vigente y de sus propios atajos: informa el
+//! tamaño por la apariencia y responde a `zoom_in`, `zoom_out`, `reset` y
+//! `size`. Las combinaciones que disparan esas acciones (`Ctrl + =`,
+//! `Ctrl + -`, `Ctrl + 0`) se declaran en el saludo y son configurables desde
+//! el bloque de configuración del plugin.
 //!
-//! Las combinaciones que disparan esas acciones son responsabilidad del plugin
-//! `shortcuts`, que registra los bindings que se quiera. Asi el zoom se puede
-//! enlazar a otras teclas, o dejarlo sin atajo, sin tocar este plugin.
+//! Corre como proceso independiente: PORT lo arranca, lee su saludo y le envía
+//! la configuración por el protocolo JSON Lines del SDK.
 
-use std::path::Path;
-use std::sync::{Arc, RwLock};
+use std::collections::BTreeMap;
+use std::sync::RwLock;
 
-use port_plugin_api::{
-    AppearanceHook, Arg, ConfigFile, Plugin, PluginConfig, Ret, Service, ServiceError,
-};
+use port_plugin_sdk::protocol::{Appearance, Binding, Capability};
+use port_plugin_sdk::runtime::Plugin;
+
+/// Identificador con el que PORT registra el plugin.
+///
+/// Debe coincidir con `[package.metadata.port] id` del `Cargo.toml`; la prueba
+/// de contrato lo comprueba leyendo el manifiesto.
+pub const PLUGIN_ID: &str = "font-zoom";
+
+/// Tamaño de fuente por defecto, en puntos.
+pub const DEFAULT_SIZE: f32 = 14.0;
+
+/// Paso de incremento/decremento por defecto, en puntos.
+pub const DEFAULT_STEP: f32 = 1.0;
+
+/// Límites por defecto del tamaño de fuente.
+pub const DEFAULT_MIN_SIZE: f32 = 6.0;
+pub const DEFAULT_MAX_SIZE: f32 = 72.0;
+
+/// Plantillas de atajos por defecto, en el formato `modificador+tecla`.
+pub const DEFAULT_ZOOM_IN_KEY: &str = "ctrl+=";
+pub const DEFAULT_ZOOM_OUT_KEY: &str = "ctrl+-";
+pub const DEFAULT_RESET_KEY: &str = "ctrl+0";
+
+/// Convierte una plantilla `ctrl+shift+=` en el [`Binding`] del protocolo.
+///
+/// La última parte es la tecla; las anteriores son modificadores. Devuelve
+/// `None` si la plantilla está vacía o trae un modificador desconocido, para
+/// que una configuración inválida no borre un atajo ya válido.
+fn parse_binding(pattern: &str, action: &str) -> Option<Binding> {
+    let parts: Vec<&str> = pattern.split('+').map(str::trim).collect();
+    let (key, modifiers) = parts.split_last()?;
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    for modifier in modifiers {
+        match modifier.to_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" => alt = true,
+            "shift" => shift = true,
+            _ => return None,
+        }
+    }
+
+    Some(Binding {
+        key: key.to_string(),
+        ctrl,
+        alt,
+        shift,
+        action: action.to_string(),
+    })
+}
 
 /// Plugin para zoom interactivo de tipografía.
-///
-/// Es clonable: la app registra una copia en el registro de plugins y conserva
-/// otra para enlazarla desde los atajos de `shortcuts`.
-#[derive(Clone)]
 pub struct FontZoomPlugin {
-    base_size: Arc<RwLock<f32>>,
-    current_size: Arc<RwLock<f32>>,
-    step: Arc<RwLock<f32>>,
-    min_size: Arc<RwLock<f32>>,
-    max_size: Arc<RwLock<f32>>,
+    base_size: RwLock<f32>,
+    current_size: RwLock<f32>,
+    step: RwLock<f32>,
+    min_size: RwLock<f32>,
+    max_size: RwLock<f32>,
+    key_zoom_in: String,
+    key_zoom_out: String,
+    key_reset: String,
 }
 
 impl FontZoomPlugin {
     /// Crea una nueva instancia con el tamaño base deseado (ej. 14.0 pt).
     pub fn new(base_size: f32) -> Self {
         Self {
-            base_size: Arc::new(RwLock::new(base_size)),
-            current_size: Arc::new(RwLock::new(base_size)),
-            step: Arc::new(RwLock::new(1.0)),
-            min_size: Arc::new(RwLock::new(6.0)),
-            max_size: Arc::new(RwLock::new(72.0)),
+            base_size: RwLock::new(base_size),
+            current_size: RwLock::new(base_size),
+            step: RwLock::new(DEFAULT_STEP),
+            min_size: RwLock::new(DEFAULT_MIN_SIZE),
+            max_size: RwLock::new(DEFAULT_MAX_SIZE),
+            key_zoom_in: DEFAULT_ZOOM_IN_KEY.to_string(),
+            key_zoom_out: DEFAULT_ZOOM_OUT_KEY.to_string(),
+            key_reset: DEFAULT_RESET_KEY.to_string(),
         }
     }
 
@@ -91,112 +148,112 @@ impl FontZoomPlugin {
         *cur
     }
 
-    /// Guarda la configuración actual en una ruta concreta de archivo de configuración.
-    pub fn save_to_file(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(config) = self.save_config() {
-            ConfigFile::save_plugin(path, self.id(), &config)?;
-        }
-        Ok(())
-    }
-
-    /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
-    pub fn save_to_default_file(&self) -> std::io::Result<()> {
-        self.save_to_file(&ConfigFile::default_path())
+    /// Identificador del plugin, para las pruebas de contrato.
+    pub fn id(&self) -> &'static str {
+        PLUGIN_ID
     }
 }
 
 impl Default for FontZoomPlugin {
     fn default() -> Self {
-        Self::new(14.0)
-    }
-}
-
-impl AppearanceHook for FontZoomPlugin {
-    fn font_size(&self) -> Option<f32> {
-        Some(self.size())
-    }
-}
-
-/// Servicio que publica el zoom para que otros plugins lo invoquen.
-struct FontZoomService(FontZoomPlugin);
-
-impl Service for FontZoomService {
-    fn id(&self) -> &str {
-        "font-zoom"
-    }
-
-    fn name(&self) -> &str {
-        "Font Zoom"
-    }
-
-    fn actions(&self) -> Vec<&'static str> {
-        vec!["zoom_in", "zoom_out", "reset", "size"]
-    }
-
-    fn invoke(&self, action: &str, _args: &[Arg]) -> Option<Result<Ret, ServiceError>> {
-        match action {
-            "zoom_in" => Some(Ok(Ret::Num(self.0.zoom_in()))),
-            "zoom_out" => Some(Ok(Ret::Num(self.0.zoom_out()))),
-            "reset" => Some(Ok(Ret::Num(self.0.reset_zoom()))),
-            "size" => Some(Ok(Ret::Num(self.0.size()))),
-            _ => None,
-        }
+        Self::new(DEFAULT_SIZE)
     }
 }
 
 impl Plugin for FontZoomPlugin {
-    fn id(&self) -> &'static str {
-        "font-zoom"
-    }
-
-    fn services(&self) -> Vec<Arc<dyn Service>> {
-        vec![Arc::new(FontZoomService(self.clone()))]
-    }
-
     fn name(&self) -> &'static str {
-        "Font Zoom Shortcuts"
+        "Font Zoom"
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        env!("CARGO_PKG_VERSION")
     }
 
-    fn appearance_hook(&self) -> Option<&dyn AppearanceHook> {
-        Some(self)
+    fn capabilities(&self) -> Vec<Capability> {
+        vec![Capability::Appearance, Capability::Input]
     }
 
-    fn default_config(&self) -> Option<PluginConfig> {
-        let mut config = PluginConfig::new();
-        config.set("default_size", *self.base_size.read().unwrap());
-        config.set("step", *self.step.read().unwrap());
-        config.set("min_size", *self.min_size.read().unwrap());
-        config.set("max_size", *self.max_size.read().unwrap());
-        Some(config)
+    /// El plugin resuelve sus propios atajos: no pasa por el puente de
+    /// servicios del proceso de PORT, que no cruza el límite del protocolo.
+    fn bindings(&self) -> Vec<Binding> {
+        [
+            (self.key_zoom_in.as_str(), "zoom_in"),
+            (self.key_zoom_out.as_str(), "zoom_out"),
+            (self.key_reset.as_str(), "reset"),
+        ]
+        .into_iter()
+        .filter_map(|(pattern, action)| parse_binding(pattern, action))
+        .collect()
     }
 
-    fn load_config(&self, config: &PluginConfig) {
-        if let Some(size) = config.get_f32("default_size") {
+    fn appearance(&self) -> Appearance {
+        Appearance {
+            font_size: Some(self.size()),
+            ..Default::default()
+        }
+    }
+
+    /// Ejecuta las acciones que ya no se publican como servicio: el zoom vive
+    /// dentro de este proceso, así que el núcleo le pregunta directamente.
+    fn invoke(&self, action: &str, _params: &serde_json::Value) -> Option<serde_json::Value> {
+        match action {
+            "zoom_in" => Some(serde_json::json!(self.zoom_in())),
+            "zoom_out" => Some(serde_json::json!(self.zoom_out())),
+            "reset" => Some(serde_json::json!(self.reset_zoom())),
+            "size" => Some(serde_json::json!(self.size())),
+            _ => None,
+        }
+    }
+
+    /// El núcleo todavía no empuja la configuración a los plugins externos;
+    /// cuando lo haga, este es el punto de entrada. Las claves de tamaño son
+    /// las mismas que usaba `PluginConfig` (`default_size`, `step`, `min_size`,
+    /// `max_size`) y las de los atajos son `key_zoom_in`, `key_zoom_out` y
+    /// `key_reset`.
+    fn configure(&mut self, values: &BTreeMap<String, String>) {
+        if let Some(size) = values
+            .get("default_size")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
             *self.base_size.write().unwrap() = size;
             self.set_size(size);
         }
-        if let Some(step) = config.get_f32("step") {
+        if let Some(step) = values
+            .get("step")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
             *self.step.write().unwrap() = step;
         }
-        if let Some(min) = config.get_f32("min_size") {
+        if let Some(min) = values
+            .get("min_size")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
             *self.min_size.write().unwrap() = min;
         }
-        if let Some(max) = config.get_f32("max_size") {
+        if let Some(max) = values
+            .get("max_size")
+            .and_then(|v| v.trim().parse::<f32>().ok())
+        {
             *self.max_size.write().unwrap() = max;
         }
-    }
 
-    fn save_config(&self) -> Option<PluginConfig> {
-        let mut config = PluginConfig::new();
-        config.set("default_size", self.size());
-        config.set("step", *self.step.read().unwrap());
-        config.set("min_size", *self.min_size.read().unwrap());
-        config.set("max_size", *self.max_size.read().unwrap());
-        Some(config)
+        // Cada atajo solo se reemplaza si la plantilla es válida: un valor mal
+        // escrito deja el anterior en pie en vez de dejar el zoom sin tecla.
+        if let Some(pattern) = values.get("key_zoom_in") {
+            if parse_binding(pattern, "zoom_in").is_some() {
+                self.key_zoom_in = pattern.clone();
+            }
+        }
+        if let Some(pattern) = values.get("key_zoom_out") {
+            if parse_binding(pattern, "zoom_out").is_some() {
+                self.key_zoom_out = pattern.clone();
+            }
+        }
+        if let Some(pattern) = values.get("key_reset") {
+            if parse_binding(pattern, "reset").is_some() {
+                self.key_reset = pattern.clone();
+            }
+        }
     }
 }
 
@@ -220,47 +277,97 @@ mod tests {
         let plugin = FontZoomPlugin::new(10.0).with_limits(8.0, 12.0);
         plugin.zoom_in(); // 11
         plugin.zoom_in(); // 12
-        plugin.zoom_in(); // 12 (clamped)
+        plugin.zoom_in(); // 12 (tope)
         assert_eq!(plugin.size(), 12.0);
 
         plugin.zoom_out(); // 11
         plugin.zoom_out(); // 10
         plugin.zoom_out(); // 9
         plugin.zoom_out(); // 8
-        plugin.zoom_out(); // 8 (clamped)
+        plugin.zoom_out(); // 8 (tope)
         assert_eq!(plugin.size(), 8.0);
     }
 
     #[test]
-    fn zoom_operations_are_pure_state_changes() {
-        // El plugin solo cambia su propio estado; la captura de teclas es
-        // trabajo del plugin de atajos, asi que aqui no debe haber ningun hook
-        // de entrada registrado.
+    fn el_plugin_declara_apariencia_y_atajos_por_defecto() {
         let plugin = FontZoomPlugin::new(14.0);
-        assert!(
-            plugin.input_hook().is_none(),
-            "font-zoom no debe capturar teclas: eso es del plugin shortcuts"
+        assert_eq!(plugin.id(), PLUGIN_ID);
+        assert_eq!(plugin.appearance().font_size, Some(14.0));
+        assert_eq!(
+            plugin.capabilities(),
+            vec![Capability::Appearance, Capability::Input]
         );
 
-        plugin.zoom_in();
-        assert_eq!(plugin.size(), 15.0);
-        plugin.zoom_out();
-        assert_eq!(plugin.size(), 14.0);
+        let bindings = plugin.bindings();
+        assert_eq!(bindings.len(), 3, "zoom_in, zoom_out y reset");
+        assert!(bindings[0].matches("=", true, false, false));
+        assert_eq!(bindings[0].action, "zoom_in");
+        assert!(bindings[1].matches("-", true, false, false));
+        assert_eq!(bindings[1].action, "zoom_out");
+        assert!(bindings[2].matches("0", true, false, false));
+        assert_eq!(bindings[2].action, "reset");
     }
 
     #[test]
-    fn config_support_load_and_save() {
-        let plugin = FontZoomPlugin::new(14.0);
-        let default_cfg = plugin.default_config().unwrap();
-        assert_eq!(default_cfg.get_f32("default_size"), Some(14.0));
+    fn la_configuracion_aplica_tamano_limites_y_atajos() {
+        let mut plugin = FontZoomPlugin::new(14.0);
+        let mut values = BTreeMap::new();
+        values.insert("default_size".to_string(), "18".to_string());
+        values.insert("step".to_string(), "2.0".to_string());
+        values.insert("min_size".to_string(), "8".to_string());
+        values.insert("max_size".to_string(), "30".to_string());
+        values.insert("key_zoom_in".to_string(), "ctrl+shift+=".to_string());
+        values.insert("key_reset".to_string(), "alt+r".to_string());
+        plugin.configure(&values);
 
-        let mut custom_cfg = PluginConfig::new();
-        custom_cfg.set("default_size", 18.0);
-        plugin.load_config(&custom_cfg);
         assert_eq!(plugin.size(), 18.0);
         assert_eq!(plugin.reset_zoom(), 18.0);
+        assert_eq!(plugin.zoom_in(), 20.0);
+        assert_eq!(plugin.zoom_out(), 18.0);
 
-        let saved = plugin.save_config().unwrap();
-        assert_eq!(saved.get_f32("default_size"), Some(18.0));
+        let bindings = plugin.bindings();
+        assert!(bindings[0].matches("=", true, false, true));
+        assert_eq!(bindings[0].action, "zoom_in");
+        assert!(bindings[2].matches("r", false, true, false));
+        assert_eq!(bindings[2].action, "reset");
+        assert!(
+            bindings[1].matches("-", true, false, false),
+            "key_zoom_out conserva su valor por defecto"
+        );
+    }
+
+    #[test]
+    fn un_atajo_invalido_no_cambia_el_binding() {
+        let mut plugin = FontZoomPlugin::new(14.0);
+        let mut values = BTreeMap::new();
+        values.insert("key_zoom_in".to_string(), "ctrl+nope+=".to_string());
+        plugin.configure(&values);
+        assert!(
+            plugin.bindings()[0].matches("=", true, false, false),
+            "una plantilla inválida deja el atajo por defecto"
+        );
+    }
+
+    #[test]
+    fn invoke_responde_las_cuatro_acciones() {
+        let plugin = FontZoomPlugin::new(14.0);
+        let params = serde_json::json!({});
+        assert_eq!(
+            plugin.invoke("zoom_in", &params),
+            Some(serde_json::json!(15.0))
+        );
+        assert_eq!(
+            plugin.invoke("zoom_out", &params),
+            Some(serde_json::json!(14.0))
+        );
+        assert_eq!(
+            plugin.invoke("size", &params),
+            Some(serde_json::json!(14.0))
+        );
+        assert_eq!(
+            plugin.invoke("reset", &params),
+            Some(serde_json::json!(14.0))
+        );
+        assert_eq!(plugin.invoke("otra", &params), None);
     }
 }

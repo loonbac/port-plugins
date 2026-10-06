@@ -3,8 +3,21 @@ name = "port-plugin-font-zoom"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "PORT Plugin: Zoom interactivo de fuente con atajos (Ctrl++, Ctrl+-, Ctrl+0)"
+description = "PORT Plugin: Zoom de fuente como proceso independiente (Ctrl+=, Ctrl+-, Ctrl+0)"
+
+# Cómo se registra el plugin al instalarlo. El `id` y la lista de `capabilities`
+# deben coincidir con lo que declara el binario al saludar; la prueba de
+# contrato lo comprueba.
+[package.metadata.port]
+id = "font-zoom"
+capabilities = ["appearance", "input"]
+
+[[bin]]
+name = "font-zoom"
+path = "src/main.rs"
 
 [dependencies]
-port-plugin-api = { workspace = true }
-port-term-core = { workspace = true }
+# Un plugin externo solo enlaza el SDK y serde_json: ni GPUI ni los internos de
+# PORT, para que instalarlo no obligue a recompilar la terminal.
+port-plugin-sdk = { workspace = true }
+serde_json = { workspace = true }
