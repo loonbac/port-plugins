@@ -210,7 +210,7 @@ fn una_herramienta_fallida_o_corriendo_usa_su_estado_y_su_fondo() {
 
 #[test]
 fn la_herramienta_read_colapsa_su_salida_en_una_sola_fila() {
-    let ruta = "/home/loonbac/Proyectos/port/plugins/herdr/src/lib.rs";
+    let ruta = concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs");
     let muestra = format!(
         "{{\"schema\":1,\"sessionHash\":\"{HASH}\",\"incarnation\":\"{INCARNATION}\",\"activity\":{{\"tasks\":[{{\"summary\":{{\"status\":\"running\"}},\"thread\":{{\"items\":[\
 {{\"kind\":\"tool\",\"name\":\"read\",\"arguments\":{{\"path\":\"{ruta}\"}},\"output\":\"linea uno\\n\\nlinea dos\\nlinea tres\",\"running\":false,\"isError\":false}},\
