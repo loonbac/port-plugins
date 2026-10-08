@@ -171,6 +171,7 @@ fn a_new_tab_never_inherits_the_app_of_another_session() {
     // Se abre una pestaña nueva: nace sin sesión asignada.
     let ctrl_shift_t = Key::new("t").ctrl().shift();
     plugin.on_key(&ctrl_shift_t);
+    assert!(plugin.take_new_session_request());
     plugin.on_session_created(1);
 
     // La sesión 0 sigue siendo pi, pero la pestaña nueva no puede heredarlo.
@@ -265,6 +266,7 @@ fn closing_a_tab_removes_it_and_deletes_the_space_when_empty() {
     // Se abre una segunda pestaña con su propia sesión.
     let ctrl_shift_t = Key::new("t").ctrl().shift();
     plugin.on_key(&ctrl_shift_t);
+    assert!(plugin.take_new_session_request());
     plugin.on_session_created(1);
     assert_eq!(
         plugin.state.read().unwrap().spaces[0].tabs.len(),
@@ -307,6 +309,7 @@ fn running_app_updates_the_matching_tab() {
     // Se crean dos pestañas en el espacio 1
     let ctrl_shift_t = Key::new("t").ctrl().shift();
     plugin.on_key(&ctrl_shift_t);
+    assert!(plugin.take_new_session_request());
     plugin.on_session_created(1);
 
     let app = RunningApp {
@@ -357,6 +360,50 @@ fn seed_watch_agent(name: &str) -> PathBuf {
         activity,
     )
     .expect("escribir actividad");
+
+    presence
+}
+
+/// Hash e incarnación del segundo subagente de las pruebas de doble clic.
+const WATCH_HASH_B: &str = "b7c1e5a9d3f24780b6c2e8d4a1f35c9e7b0d2a4c6e8f1b3d5a7c9e0f2b4d6a8c";
+const WATCH_INCARNATION_B: &str = "2b9d1e77-0f3a-4c6e-8b21-9d4f6a2c5e70";
+
+/// Presencia viva con DOS subagentes distintos, para distinguir dos clics.
+///
+/// La identidad de sesión y la etiqueta difieren, así que la petición del visor
+/// se puede atribuir a uno u otro sin ambigüedad.
+fn seed_two_watch_agents(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "herdr-viewer2-{name}-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let presence = root.join("gentle-agents").join("presence");
+    std::fs::create_dir_all(&presence).expect("crear presencia");
+
+    let now = agents::now_ms();
+    for (hash, incarnation, label, task) in [
+        (WATCH_HASH, WATCH_INCARNATION, "herdr viewer A", "t_a"),
+        (WATCH_HASH_B, WATCH_INCARNATION_B, "herdr viewer B", "t_b"),
+    ] {
+        let header = format!(
+            "{{\"schema\":1,\"sessionHash\":\"{hash}\",\"incarnation\":\"{incarnation}\",\"label\":\"sesion de prueba\",\"heartbeat\":{now},\"generation\":1,\"unavailable\":null}}"
+        );
+        std::fs::write(
+            presence.join(format!("{hash}.{incarnation}.header.json")),
+            header,
+        )
+        .expect("escribir header");
+        let activity = format!(
+            "{{\"schema\":1,\"sessionHash\":\"{hash}\",\"incarnation\":\"{incarnation}\",\"generation\":1,\"activity\":{{\"tasks\":[{{\"summary\":{{\"id\":\"{task}\",\"agent\":\"gentle-ai-worker\",\"label\":\"{label}\",\"status\":\"running\",\"lastStep\":\"reading the presence\",\"createdAt\":1,\"startedAt\":2,\"endedAt\":null,\"lastActivityAt\":{now}}}}}]}}}}"
+        );
+        std::fs::write(
+            presence.join(format!("{hash}.{incarnation}.activity.json")),
+            activity,
+        )
+        .expect("escribir actividad");
+    }
 
     presence
 }
@@ -449,7 +496,7 @@ fn hacer_clic_en_un_subagente_ocupa_la_pestana_activa_sin_crear_nada() {
         // terminal original, pero ya guarda lo necesario para volver a él.
         assert_eq!(tab.session_id, 0, "el terminal original sigue a la vista");
         let previo = tab.watching.as_ref().expect("la pestaña apunta al visor");
-        assert_eq!(previo.session_id, 0, "se guardó la sesión original");
+        assert_eq!(previo.session_id, Some(0), "se guardó la sesión original");
         assert_eq!(previo.title, titulo_antes, "se guardó el título original");
         assert!(!previo.title_locked, "se guardó el bloqueo original");
         assert_eq!(
@@ -468,9 +515,8 @@ fn hacer_clic_en_un_subagente_ocupa_la_pestana_activa_sin_crear_nada() {
         "el visor nunca pide un shell por defecto"
     );
 
-    // El núcleo consume la petición una sola vez: el comando lleva la
-    // identidad de la sesión y el directorio de presencia, no una ruta de
-    // registro.
+    // El núcleo consume la petición: el comando lleva la identidad de la
+    // sesión y el directorio de presencia, no una ruta de registro.
     let config = plugin
         .take_spawn_session_request()
         .expect("el clic debe pedir una sesión de visor");
@@ -480,9 +526,16 @@ fn hacer_clic_en_un_subagente_ocupa_la_pestana_activa_sin_crear_nada() {
     assert_eq!(config.args[4], WATCH_HASH);
     assert_eq!(config.args[5], WATCH_INCARNATION);
     assert_eq!(config.args[6], expected_label);
+    // Mientras el núcleo no cree la sesión, la petición sigue en vuelo y el
+    // host puede reintentarla; se agota recién al crear la sesión.
+    assert!(
+        plugin.take_spawn_session_request().is_some(),
+        "la petición viva se reintenta"
+    );
+    plugin.on_session_created(7);
     assert!(
         plugin.take_spawn_session_request().is_none(),
-        "una petición de visor se consume una sola vez"
+        "una petición de visor se consume al crear su sesión"
     );
 }
 
@@ -518,7 +571,7 @@ fn crear_la_sesion_del_visor_enlaza_la_pestana_activa_y_bloquea_su_titulo() {
                 .as_ref()
                 .expect("sigue apuntando al original")
                 .session_id,
-            0,
+            Some(0),
             "el terminal original sigue guardado para volver a él"
         );
         assert!(s.pending_viewer_title.is_none(), "la etiqueta se agota");
@@ -576,29 +629,38 @@ fn escape_y_ctrl_w_en_el_visor_piden_cerrar_su_sesion() {
         .into_iter()
         .next()
         .expect("un subagente visible");
+
+    // Escape sin modificadores pide cerrar la sesión del visor, consume y
+    // restaura la pestaña sin esperar al callback del núcleo.
     assert!(plugin.watch_entry(&entry));
     assert!(plugin.take_spawn_session_request().is_some());
     plugin.on_session_created(7);
-
-    // Escape sin modificadores pide cerrar la sesión del visor y consume.
     assert_eq!(plugin.on_key(&Key::new("Escape")), KeyAction::Consume);
     assert_eq!(plugin.take_close_session_request(), Some(7));
-    assert!(
-        plugin.state.read().unwrap().spaces[0].tabs[0]
-            .watching
-            .is_some(),
-        "la pestaña no se borra: solo se pide cerrar la sesión del visor"
-    );
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs.len(), 1, "la pestaña no se borra");
+        assert!(s.spaces[0].tabs[0].watching.is_none(), "vuelve al terminal");
+        assert_eq!(s.spaces[0].tabs[0].session_id, 0);
+    }
 
-    // Ctrl+W hace exactamente lo mismo, nunca borra la pestaña del usuario.
+    // Ctrl+W hace exactamente lo mismo.
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
     assert_eq!(plugin.on_key(&Key::new("w").ctrl()), KeyAction::Consume);
     assert_eq!(plugin.take_close_session_request(), Some(7));
     assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+    assert_eq!(plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 0);
 
     // close_active_tab tampoco borra una pestaña ocupada por el visor.
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
     assert!(plugin.close_active_tab());
     assert_eq!(plugin.take_close_session_request(), Some(7));
     assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+    assert_eq!(plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 0);
 
     // Escape con modificadores no es la salida del visor.
     assert_eq!(plugin.on_key(&Key::new("Escape").ctrl()), KeyAction::Pass);
@@ -612,6 +674,7 @@ fn los_atajos_normales_de_pestana_no_cambian() {
     assert_eq!(plugin.on_key(&Key::new("Escape")), KeyAction::Pass);
     // Ctrl+W sigue cerrando la pestaña activa cuando hay más de una.
     plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
     plugin.on_session_created(1);
     assert_eq!(plugin.on_key(&Key::new("w").ctrl()), KeyAction::Consume);
     assert_eq!(plugin.take_close_session_request(), Some(1));
@@ -728,4 +791,1096 @@ fn la_pestana_con_titulo_bloqueado_ignora_la_app_en_primer_plano() {
         tab_identity(&normal),
         (Some(ICON_ROBOT), "Bash".to_string())
     );
+}
+
+// ── Enlace de sesiones por id ──────────────────────────────────────────
+
+#[test]
+fn cambiar_de_espacio_antes_de_crear_la_sesion_enlaza_la_pestana_que_la_pidio() {
+    let plugin = HerdrPlugin::default();
+
+    // Ctrl+Alt+T crea space-2 con una pestaña pendiente que pidió su shell.
+    plugin.create_space_and_open_sidebar();
+    // El usuario se cambia a space-1 antes de que el núcleo cree la sesión.
+    plugin.select_space(0);
+
+    // El núcleo crea la sesión del id que la pidió, no de la pestaña activa.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(
+        s.spaces[1].tabs[0].session_id, 1,
+        "la sesión va a la pestaña que la pidió, no a la activa"
+    );
+    assert_eq!(
+        s.spaces[0].tabs[0].session_id, 0,
+        "la terminal de space-1 conserva su sesión"
+    );
+    assert_eq!(s.active_space_index, 0, "seguimos en space-1");
+    drop(s);
+    assert_eq!(
+        plugin.active_session(),
+        0,
+        "el área principal sigue dibujando la sesión de space-1"
+    );
+}
+
+#[test]
+fn el_visor_no_deja_la_pestana_sin_sesion_cuando_su_terminal_aun_no_existe() {
+    let presence = seed_watch_agent("pendiente");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // space-2 nace con una pestaña pendiente y el usuario pulsa la fila de
+    // AGENTS antes de que su terminal exista.
+    plugin.create_space_and_open_sidebar();
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+
+    // Frame del núcleo: primero el shell pendiente del espacio, después el
+    // visor que retargeteó la misma pestaña.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // El visor se cierra: la pestaña no tenía terminal, así que pide uno fresco
+    // en lugar de quedarse con el centinela.
+    plugin.on_session_closed(7);
+
+    // El núcleo crea el shell fresco que la pestaña pidió.
+    assert!(
+        plugin.take_new_session_request(),
+        "la pestaña restaurada debe pedir un shell"
+    );
+    plugin.on_session_created(8);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces.len(), 2, "los dos espacios siguen vivos");
+    let space = s.spaces.get(1).expect("space-2 sigue existiendo");
+    let tab = &space.tabs[0];
+    assert_ne!(
+        tab.session_id, PENDING_SESSION,
+        "la pestaña nunca queda con el centinela pegado"
+    );
+    assert_eq!(tab.session_id, 8, "la pestaña recibe un terminal real");
+}
+
+#[test]
+fn cerrar_una_sesion_reajusta_los_indices_activos() {
+    let plugin = HerdrPlugin::default();
+
+    // Tres espacios con sesiones vivas.
+    plugin.create_space_and_open_sidebar();
+    plugin.create_space_and_open_sidebar();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(2);
+
+    // El usuario mira el espacio del medio.
+    plugin.select_space(1);
+    let activo_antes = plugin.state.read().unwrap().spaces[1].name.clone();
+    assert_eq!(activo_antes, "space-2");
+
+    // Se cierra la sesión del primer espacio: su pestaña y el espacio se van.
+    plugin.on_session_closed(0);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces.len(), 2, "queda un espacio por cada sesión viva");
+    assert_eq!(
+        s.spaces[s.active_space_index].name, activo_antes,
+        "el espacio activo es el MISMO, no el que quedó en su índice"
+    );
+    for space in &s.spaces {
+        assert!(
+            space.active_tab_index < space.tabs.len(),
+            "el índice de pestaña activa no puede quedar fuera de rango en {}",
+            space.name
+        );
+    }
+}
+
+#[test]
+fn el_boton_mas_del_topbar_no_hereda_la_sesion_de_otra_pestana() {
+    let plugin = HerdrPlugin::default();
+
+    // El `+` del topbar crea su pestaña por el mismo camino del estado.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+
+    {
+        let s = plugin.state.read().unwrap();
+        let tab = s.spaces[0].tabs.last().expect("la pestaña nueva");
+        assert_eq!(
+            tab.session_id, PENDING_SESSION,
+            "la pestaña del topbar no puede nacer con la sesión de otra"
+        );
+    }
+
+    // El núcleo le asigna su propia sesión.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+
+    let s = plugin.state.read().unwrap();
+    let tab = s.spaces[0].tabs.last().expect("la pestaña nueva");
+    assert_eq!(tab.session_id, 1, "la sesión real llega a la pestaña nueva");
+    assert_eq!(
+        s.spaces[0].tabs[0].session_id, 0,
+        "la terminal original conserva la 0"
+    );
+}
+
+#[test]
+fn cerrar_una_pestana_pendiente_no_deja_su_shell_en_otra_pestana() {
+    let plugin = HerdrPlugin::default();
+
+    // El topbar abre una pestaña pendiente.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    // El usuario la cierra antes de que el núcleo cree su shell.
+    assert!(plugin.close_active_tab());
+
+    assert!(
+        !plugin.take_new_session_request(),
+        "la petición de la pestaña cerrada no debe sobrevivir"
+    );
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 0,
+        "el terminal preexistente conserva su sesión"
+    );
+
+    // Una pestaña legítima nueva sí pide y recibe su propia sesión.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(9);
+
+    let s = plugin.state.read().unwrap();
+    let tabs = &s.spaces[0].tabs;
+    assert_eq!(tabs.len(), 2, "solo sobreviven la vieja y la nueva");
+    assert_eq!(
+        tabs.last().unwrap().session_id,
+        9,
+        "la sesión cae en la pestaña nueva"
+    );
+    assert_eq!(tabs[0].session_id, 0, "la pestaña vieja no se toca");
+}
+
+#[test]
+fn cerrar_la_pestana_del_visor_antes_de_crear_su_sesion_cancela_el_visor() {
+    let presence = seed_watch_agent("cancela");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // Una segunda pestaña para poder cerrar la que el visor va a ocupar.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+
+    // La pestaña se cierra antes de que el núcleo pida la sesión del visor.
+    assert!(plugin.close_active_tab());
+
+    assert!(
+        plugin.take_spawn_session_request().is_none(),
+        "sin pestaña vigente no se crea una sesión de visor"
+    );
+}
+
+#[test]
+fn cerrar_una_pestana_pendiente_no_pide_cerrar_una_sesion_inexistente() {
+    let plugin = HerdrPlugin::default();
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    assert!(plugin.close_active_tab());
+
+    let requested = plugin.take_close_session_request();
+    assert_ne!(
+        requested,
+        Some(PENDING_SESSION),
+        "no se pide cerrar el centinela de una pestaña pendiente"
+    );
+    assert!(
+        requested.is_none(),
+        "una pestaña pendiente no tiene sesión que cerrar"
+    );
+}
+
+#[test]
+fn el_visor_no_restaura_una_sesion_que_ya_se_cerro() {
+    let presence = seed_watch_agent("cerrada");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+
+    // El visor ocupa la pestaña que mostraba el terminal original (sesión 0).
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // El shell original muere mientras el visor está abierto: su pestaña no se
+    // restaura todavía (la sesión del visor sigue viva).
+    plugin.on_session_closed(0);
+
+    // Al cerrar el visor, la sesión original ya no existe: la pestaña no puede
+    // volver a un id muerto, así que pide un shell fresco.
+    plugin.on_session_closed(7);
+
+    let s = plugin.state.read().unwrap();
+    let tab = &s.spaces[0].tabs[0];
+    assert_ne!(
+        tab.session_id, 0,
+        "una sesión ya cerrada no puede volver a la pestaña"
+    );
+    assert_eq!(tab.session_id, PENDING_SESSION, "la pestaña queda pendiente");
+    drop(s);
+
+    assert!(
+        plugin.take_new_session_request(),
+        "la pestaña pide un shell fresco"
+    );
+    plugin.on_session_created(8);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 8,
+        "el shell fresco llega a la pestaña restaurada"
+    );
+}
+
+#[test]
+fn cerrar_un_espacio_no_cambia_al_activo_entre_nombres_repetidos() {
+    let plugin = HerdrPlugin::default();
+
+    // Tres espacios con sesión viva, todos con el MISMO nombre.
+    plugin.create_space_and_open_sidebar();
+    plugin.create_space_and_open_sidebar();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(2);
+    {
+        let mut s = plugin.state.write().unwrap();
+        for (i, space) in s.spaces.iter_mut().enumerate() {
+            space.name = "mismo".to_string();
+            space.branch = format!("b{i}");
+        }
+    }
+
+    // El usuario mira el espacio del medio y se cierra el tercero.
+    plugin.select_space(1);
+    plugin.on_session_closed(2);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces.len(), 2, "el tercer espacio desaparece");
+    let activo = &s.spaces[s.active_space_index];
+    assert_eq!(
+        activo.branch, "b1",
+        "el activo sigue siendo el mismo espacio, no el primero con su nombre"
+    );
+    assert_eq!(activo.tabs[0].session_id, 1);
+}
+
+#[test]
+fn un_spawn_fallido_no_desvia_la_siguiente_sesion_a_otra_pestana() {
+    let plugin = HerdrPlugin::default();
+
+    // El principal pide un shell para la primera pestaña, pero el spawn falla:
+    // el núcleo no llama a `on_session_created`.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+
+    // Llega una segunda petición mientras la primera sigue en vuelo.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    // El reintento sigue apuntando a la primera: no se llevó por delante la
+    // petición de la segunda.
+    {
+        let s = plugin.state.read().unwrap();
+        assert!(
+            s.pending_shell_tabs.contains(&3),
+            "la petición de la segunda pestaña sigue encolada"
+        );
+    }
+
+    plugin.on_session_created(9);
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs[0].session_id, 0, "la terminal base no se toca");
+        assert_eq!(
+            s.spaces[0].tabs[1].session_id, 9,
+            "la sesión cae en la pestaña que la pidió"
+        );
+        assert_eq!(
+            s.spaces[0].tabs[2].session_id, PENDING_SESSION,
+            "la segunda pestaña pendiente no hereda la sesión ajena"
+        );
+    }
+
+    // La petición de la segunda pestaña se entrega en su propio turno.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(10);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[2].session_id,
+        10,
+        "la segunda pestaña termina con su sesión real"
+    );
+}
+
+#[test]
+fn la_pestana_pendiente_reintenta_su_shell_si_la_creacion_falla() {
+    let plugin = HerdrPlugin::default();
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+
+    // El host reintenta la misma pestaña: vuelve a pedir sin encolar otra.
+    assert!(plugin.take_new_session_request());
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(4);
+
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[1].session_id,
+        4,
+        "la pestaña pendiente termina con su sesión real"
+    );
+}
+
+#[test]
+fn el_visor_espera_a_que_resuelva_el_shell_en_vuelo() {
+    let presence = seed_watch_agent("en-vuelo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+
+    // Un shell pendiente queda en vuelo.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+
+    // Mientras el shell está en vuelo, el visor no se intercala.
+    assert!(
+        plugin.take_spawn_session_request().is_none(),
+        "el visor espera al shell en vuelo"
+    );
+
+    // El shell resuelve y el visor se entrega en el render siguiente.
+    plugin.on_session_created(5);
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(6);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces[0].tabs[1].session_id, 5, "el shell va a la pestaña nueva");
+    assert_eq!(
+        s.spaces[0].tabs[0].session_id, 6,
+        "el visor ocupa la pestaña del clic"
+    );
+}
+
+#[test]
+fn una_configuracion_con_varios_espacios_no_inventa_sesiones() {
+    let plugin = HerdrPlugin::default();
+    let mut cfg = port_plugin_api::PluginConfig::new();
+    cfg.set("spaces", "a:main,b:main,c:main");
+    plugin.load_config(&cfg);
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces.len(), 3, "los tres espacios de la config");
+        assert_eq!(s.spaces[0].tabs[0].session_id, 0, "solo la sesión 0 existe");
+        assert_eq!(
+            s.spaces[1].tabs[0].session_id, PENDING_SESSION,
+            "el segundo espacio nace pendiente"
+        );
+        assert_eq!(
+            s.spaces[2].tabs[0].session_id, PENDING_SESSION,
+            "el tercer espacio nace pendiente"
+        );
+    }
+
+    // El núcleo crea una por render y las enlaza a la pestaña correcta.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(2);
+    assert!(!plugin.take_new_session_request(), "no queda ninguna más");
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces[0].tabs[0].session_id, 0);
+    assert_eq!(s.spaces[1].tabs[0].session_id, 1, "la sesión 1 va al segundo espacio");
+    assert_eq!(s.spaces[2].tabs[0].session_id, 2, "la sesión 2 va al tercero");
+}
+
+#[test]
+fn cerrar_todas_las_sesiones_no_deja_una_pestana_con_una_sesion_muerta() {
+    let plugin = HerdrPlugin::default();
+
+    plugin.on_session_closed(0);
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces.len(), 1, "queda el espacio reconstruido");
+        let tab = &s.spaces[0].tabs[0];
+        assert_ne!(tab.session_id, 0, "no puede apuntar a la sesión que murió");
+        assert_eq!(tab.session_id, PENDING_SESSION);
+    }
+
+    assert!(plugin.take_new_session_request(), "pide un shell fresco");
+    plugin.on_session_created(5);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        5,
+        "el shell fresco llega a la pestaña"
+    );
+}
+
+#[test]
+fn la_configuracion_no_duplica_ids_de_pestana() {
+    let plugin = HerdrPlugin::default();
+    let mut cfg = port_plugin_api::PluginConfig::new();
+    cfg.set("spaces", "a:main,b:main,c:main");
+    plugin.load_config(&cfg);
+
+    // Una pestaña nueva por el mismo camino del topbar.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+
+    // El id nuevo continúa la numeración y no repite ninguno declarado.
+    let (nuevo, repetido) = {
+        let s = plugin.state.read().unwrap();
+        let nuevo = s.spaces[s.active_space_index]
+            .tabs
+            .last()
+            .expect("la pestaña nueva")
+            .id;
+        let repetido = s
+            .spaces
+            .iter()
+            .flat_map(|sp| sp.tabs.iter())
+            .filter(|t| t.id == nuevo)
+            .count();
+        (nuevo, repetido)
+    };
+    assert_eq!(repetido, 1, "el id de la pestaña nueva es único");
+    assert!(nuevo > 3, "el id nuevo continúa la numeración declarada");
+
+    // Cada shell encolado enlaza a una pestaña distinta y correcta.
+    for session in [10usize, 11, 12] {
+        assert!(plugin.take_new_session_request());
+        plugin.on_session_created(session);
+    }
+    assert!(!plugin.take_new_session_request(), "no queda ninguna más");
+
+    let s = plugin.state.read().unwrap();
+    let mut enlazadas: Vec<(usize, usize)> = Vec::new();
+    for sp in &s.spaces {
+        for t in &sp.tabs {
+            if t.session_id >= 10 {
+                enlazadas.push((t.id, t.session_id));
+            }
+        }
+    }
+    enlazadas.sort_unstable();
+    assert_eq!(enlazadas, vec![(2, 10), (3, 11), (4, 12)]);
+}
+
+#[test]
+fn cerrar_la_pestana_del_visor_desde_el_topbar_restaura_el_terminal_original() {
+    let presence = seed_watch_agent("topbar");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // El topbar cierra la pestaña que muestra el visor: no se borra.
+    assert!(plugin.state.write().unwrap().close_tab_at(0, 0));
+    assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+    assert_eq!(
+        plugin.take_close_session_request(),
+        Some(7),
+        "se cierra la sesión del visor, no la pestaña"
+    );
+
+    plugin.on_session_closed(7);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        0,
+        "vuelve el terminal original"
+    );
+}
+
+#[test]
+fn cerrar_una_pestana_normal_con_el_helper_deja_el_indice_valido() {
+    let plugin = HerdrPlugin::default();
+    plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+
+    assert!(plugin.state.write().unwrap().close_tab_at(0, 1));
+
+    let (len, active, session) = {
+        let s = plugin.state.read().unwrap();
+        (
+            s.spaces[0].tabs.len(),
+            s.spaces[0].active_tab_index,
+            s.spaces[0].tabs[0].session_id,
+        )
+    };
+    assert_eq!(len, 1);
+    assert!(active < len, "el índice activo queda dentro de rango");
+    assert_eq!(session, 0);
+    assert_eq!(plugin.take_close_session_request(), Some(1));
+}
+
+#[test]
+fn un_segundo_clic_en_agents_cambia_el_visor_sin_perder_el_terminal_original() {
+    let presence = seed_watch_agent("segundo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    let a = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&a));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // Segundo clic: conserva el terminal original (0), no el visor (7).
+    let b = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&b));
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0]
+            .watching
+            .as_ref()
+            .expect("sigue apuntando al original")
+            .session_id,
+        Some(0),
+        "el terminal original no se pierde"
+    );
+    assert_eq!(
+        plugin.take_close_session_request(),
+        Some(7),
+        "se pide cerrar el visor anterior"
+    );
+
+    // La sesión del visor nuevo reemplaza a la vieja.
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(8);
+    // El cierre del visor viejo ya no coincide con la pestaña.
+    plugin.on_session_closed(7);
+    assert_eq!(plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 8);
+
+    plugin.on_session_closed(8);
+    let s = plugin.state.read().unwrap();
+    let tab = &s.spaces[0].tabs[0];
+    assert_eq!(tab.session_id, 0, "vuelve el terminal original");
+    assert_eq!(tab.title, "terminal", "vuelve el título original");
+    assert!(!tab.title_locked);
+}
+
+#[test]
+fn un_visor_en_vuelo_cuya_pestana_desaparece_no_enlaza_la_sesion_a_otra_pestana() {
+    let presence = seed_watch_agent("vuelo-caido");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // Dos pestañas con sesión; el visor toma la primera (sesión 0).
+    plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(5);
+    plugin.select_tab(0);
+
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+
+    // La pestaña del visor desaparece antes de que su sesión se cree.
+    plugin.on_session_closed(0);
+
+    assert!(
+        plugin.take_spawn_session_request().is_none(),
+        "el visor no puede redirigirse a otra pestaña"
+    );
+    plugin.on_session_created(9);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        5,
+        "la pestaña restante no recibe la sesión del visor"
+    );
+}
+
+#[test]
+fn una_sesion_que_herdr_no_pidio_no_toca_sus_pestanas() {
+    let plugin = HerdrPlugin::default();
+    {
+        let mut s = plugin.state.write().unwrap();
+        s.spaces[0].tabs[0].watching = Some(WatchedTab {
+            session_id: Some(0),
+            title: "terminal".to_string(),
+            title_locked: false,
+        });
+        s.pending_viewer_title = Some("no tocar".to_string());
+    }
+    let antes = {
+        let s = plugin.state.read().unwrap();
+        s.spaces
+            .iter()
+            .flat_map(|sp| sp.tabs.iter().map(|t| (t.session_id, t.title.clone(), t.title_locked)))
+            .collect::<Vec<_>>()
+    };
+
+    plugin.on_session_created(42);
+
+    let despues = {
+        let s = plugin.state.read().unwrap();
+        s.spaces
+            .iter()
+            .flat_map(|sp| sp.tabs.iter().map(|t| (t.session_id, t.title.clone(), t.title_locked)))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        antes, despues,
+        "una sesión ajena no se enlaza a las pestañas de herdr"
+    );
+    assert_eq!(
+        plugin.state.read().unwrap().pending_viewer_title.as_deref(),
+        Some("no tocar"),
+        "no se consume el título del visor"
+    );
+}
+
+#[test]
+fn recargar_una_configuracion_con_la_sesion_cero_muerta_no_la_restaura() {
+    let plugin = HerdrPlugin::default();
+
+    // Un segundo espacio mantiene vivo el estado tras cerrar la sesión 0.
+    plugin.create_space_and_open_sidebar();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    plugin.on_session_closed(0);
+
+    let mut cfg = port_plugin_api::PluginConfig::new();
+    cfg.set("spaces", "a:main,b:main");
+    plugin.load_config(&cfg);
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces.len(), 2);
+        assert_ne!(
+            s.spaces[0].tabs[0].session_id, 0,
+            "no restaura la sesión que ya murió"
+        );
+        assert_eq!(s.spaces[0].tabs[0].session_id, PENDING_SESSION);
+        assert_eq!(s.spaces[1].tabs[0].session_id, PENDING_SESSION);
+    }
+
+    // Las dos pestañas piden su shell y lo reciben en orden.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(3);
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(4);
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces[0].tabs[0].session_id, 3);
+    assert_eq!(s.spaces[1].tabs[0].session_id, 4);
+}
+
+#[test]
+fn recargar_una_configuracion_deja_el_espacio_activo_dentro_de_rango() {
+    let plugin = HerdrPlugin::default();
+    plugin.create_space_and_open_sidebar();
+    plugin.create_space_and_open_sidebar();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(1);
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(2);
+    assert_eq!(plugin.state.read().unwrap().active_space_index, 2);
+
+    let mut cfg = port_plugin_api::PluginConfig::new();
+    cfg.set("spaces", "a:main");
+    plugin.load_config(&cfg);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces.len(), 1);
+    assert_eq!(
+        s.active_space_index, 0,
+        "el índice activo queda dentro del vector nuevo"
+    );
+    drop(s);
+    assert_eq!(
+        plugin.active_session(),
+        0,
+        "la sesión activa es la del espacio declarado, no una ajena"
+    );
+}
+
+#[test]
+fn la_sesion_activa_no_cae_en_la_cero_cuando_no_hay_pestana_activa() {
+    let plugin = HerdrPlugin::default();
+    assert_eq!(plugin.active_session(), 0, "la pestaña normal sigue en 0");
+
+    plugin.state.write().unwrap().active_space_index = 5;
+    assert_eq!(
+        plugin.active_session(),
+        PENDING_SESSION,
+        "sin pestaña activa no se cae en la sesión 0"
+    );
+
+    plugin.state.write().unwrap().spaces.clear();
+    assert_eq!(plugin.active_session(), PENDING_SESSION);
+}
+
+#[test]
+fn un_segundo_clic_mientras_el_visor_esta_en_vuelo_no_pierde_la_peticion() {
+    let presence = seed_two_watch_agents("en-vuelo-clic");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    let entries = plugin.visible_agents(2);
+    let a = entries
+        .iter()
+        .find(|e| e.session_hash == WATCH_HASH)
+        .expect("subagente A")
+        .clone();
+    let b = entries
+        .iter()
+        .find(|e| e.session_hash == WATCH_HASH_B)
+        .expect("subagente B")
+        .clone();
+
+    assert!(plugin.watch_entry(&a));
+    assert!(plugin.take_spawn_session_request().is_some());
+    // Segundo clic sobre la MISMA pestaña mientras la sesión de A está en vuelo.
+    assert!(plugin.watch_entry(&b));
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(
+            s.in_flight,
+            Some(crate::state::InFlight::Viewer(1)),
+            "el visor de A sigue en vuelo"
+        );
+        assert_eq!(
+            s.pending_watch
+                .as_ref()
+                .expect("petición viva")
+                .session_hash,
+            WATCH_HASH,
+            "la petición en vuelo sigue siendo la de A"
+        );
+    }
+
+    plugin.on_session_created(7);
+    plugin.on_session_closed(7);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        0,
+        "vuelve el terminal original"
+    );
+}
+
+#[test]
+fn el_visor_no_borra_la_pestana_si_su_watching_se_perdio_en_el_camino() {
+    let presence = seed_watch_agent("watching-perdido");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+
+    // Primer visor (A) sobre la pestaña 1.
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // Segundo clic (B) pide cerrar el visor 7 y conserva el original.
+    assert!(plugin.watch_entry(&entry));
+    assert_eq!(plugin.take_close_session_request(), Some(7));
+
+    // Un shell en vuelo retrasa el spawn de B.
+    plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    assert!(
+        plugin.take_spawn_session_request().is_none(),
+        "B queda diferido por el shell en vuelo"
+    );
+
+    // El cierre del visor 7 se procesa antes de que B enlace: la pestaña
+    // pierde su `watching` y vuelve al terminal original.
+    plugin.on_session_closed(7);
+    assert!(
+        plugin.state.read().unwrap().spaces[0].tabs[0]
+            .watching
+            .is_none(),
+        "el camino de vuelta se perdió en el intermedio"
+    );
+
+    // El shell resuelve y B enlaza: debe sintetizar un `watching` nuevo.
+    plugin.on_session_created(5);
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(8);
+
+    plugin.on_session_closed(8);
+    let s = plugin.state.read().unwrap();
+    assert!(
+        s.spaces[0].tabs.iter().any(|t| t.id == 1),
+        "la pestaña del usuario no se borra"
+    );
+    let tab1 = s.spaces[0].tabs.iter().find(|t| t.id == 1).unwrap();
+    assert_eq!(tab1.session_id, 0, "vuelve el terminal original");
+}
+
+#[test]
+fn un_clic_en_otra_pestana_mientras_el_visor_esta_en_vuelo_no_pisa_la_peticion() {
+    let presence = seed_two_watch_agents("otra-pestana");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    let entries = plugin.visible_agents(2);
+    let a = entries
+        .iter()
+        .find(|e| e.session_hash == WATCH_HASH)
+        .expect("subagente A")
+        .clone();
+    let b = entries
+        .iter()
+        .find(|e| e.session_hash == WATCH_HASH_B)
+        .expect("subagente B")
+        .clone();
+
+    // Dos pestañas con sesión propia.
+    plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(5);
+    plugin.select_tab(0);
+
+    // El clic A deja su visor en vuelo sobre la pestaña 1.
+    assert!(plugin.watch_entry(&a));
+    assert!(plugin.take_spawn_session_request().is_some());
+
+    // El usuario cambia a la pestaña 2 y vuelve a pulsar: no se honra.
+    plugin.select_tab(1);
+    assert!(plugin.watch_entry(&b));
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(
+            s.in_flight,
+            Some(crate::state::InFlight::Viewer(1)),
+            "el visor de A sigue en vuelo sobre la pestaña 1"
+        );
+        assert_eq!(
+            s.pending_watch
+                .as_ref()
+                .expect("petición viva")
+                .session_hash,
+            WATCH_HASH,
+            "la petición en vuelo sigue siendo la de A"
+        );
+        assert_eq!(
+            s.pending_viewer_tab,
+            Some(1),
+            "sigue apuntando a la pestaña 1"
+        );
+    }
+
+    plugin.on_session_created(7);
+    plugin.on_session_closed(7);
+
+    let s = plugin.state.read().unwrap();
+    let tab1 = s.spaces[0].tabs.iter().find(|t| t.id == 1).expect("pestaña 1");
+    let tab2 = s.spaces[0].tabs.iter().find(|t| t.id == 2).expect("pestaña 2");
+    assert_eq!(tab1.session_id, 0, "la pestaña 1 vuelve a su terminal");
+    assert_eq!(tab2.session_id, 5, "la pestaña 2 no se toca");
+}
+
+#[test]
+fn salir_del_visor_restaura_el_terminal_sin_esperar_al_nucleo() {
+    let presence = seed_watch_agent("salir-sin-nucleo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // Salir del visor restaura YA: el host cierra por petición sin llamar a
+    // `on_session_closed`.
+    assert!(plugin.request_viewer_close());
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces.len(), 1);
+        let tab = &s.spaces[0].tabs[0];
+        assert_eq!(tab.session_id, 0, "el terminal original vuelve en el acto");
+        assert_eq!(tab.title, "terminal");
+        assert!(!tab.title_locked);
+        assert!(tab.watching.is_none());
+    }
+    assert_eq!(plugin.active_session(), 0);
+    assert_eq!(plugin.take_close_session_request(), Some(7));
+
+    // El callback tardío (si llegara) debe ser inofensivo.
+    plugin.on_session_closed(7);
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces.len(), 1, "el espacio sigue vivo");
+    assert_eq!(s.spaces[0].tabs[0].session_id, 0);
+    assert!(s.spaces[0].tabs[0].watching.is_none());
+}
+
+#[test]
+fn cerrar_con_la_equis_el_visor_restaura_el_terminal_sin_esperar_al_nucleo() {
+    let presence = seed_watch_agent("equis-sin-nucleo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    // La `×` del topbar pasa por el mismo cierre compartido.
+    assert!(plugin.state.write().unwrap().close_tab_at(0, 0));
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].tabs.len(), 1, "la pestaña no se borra");
+        let tab = &s.spaces[0].tabs[0];
+        assert_eq!(tab.session_id, 0, "restaura en el acto");
+        assert!(tab.watching.is_none());
+    }
+    assert_eq!(plugin.take_close_session_request(), Some(7));
+}
+
+#[test]
+fn salir_de_un_visor_sin_terminal_pide_un_shell() {
+    let presence = seed_watch_agent("visor-pendiente");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // La pestaña nace pendiente y el visor la ocupa antes de tener terminal.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space();
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+
+    // El shell del espacio se crea primero, como en el núcleo real.
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(5);
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+
+    assert!(plugin.request_viewer_close());
+    {
+        let s = plugin.state.read().unwrap();
+        let tab = s.spaces[0].tabs.iter().find(|t| t.id == 2).unwrap();
+        assert_eq!(tab.session_id, PENDING_SESSION, "sin terminal al que volver");
+        assert!(tab.watching.is_none());
+    }
+    assert!(plugin.take_new_session_request(), "pide un shell fresco");
+    plugin.on_session_created(8);
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0]
+            .tabs
+            .iter()
+            .find(|t| t.id == 2)
+            .unwrap()
+            .session_id,
+        8
+    );
+}
+
+#[test]
+fn la_pestana_que_salio_del_visor_se_puede_cerrar() {
+    let presence = seed_watch_agent("cerrable");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // Una segunda pestaña con su sesión para que Ctrl+W tenga qué cerrar.
+    plugin.create_tab_in_active_space();
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(5);
+    plugin.select_tab(0);
+
+    let entry = plugin
+        .visible_agents(1)
+        .into_iter()
+        .next()
+        .expect("un subagente visible");
+    assert!(plugin.watch_entry(&entry));
+    assert!(plugin.take_spawn_session_request().is_some());
+    plugin.on_session_created(7);
+    assert!(plugin.request_viewer_close());
+
+    // Ya no es una pestaña de visor: Ctrl+W la cierra normalmente.
+    assert_eq!(plugin.on_key(&Key::new("w").ctrl()), KeyAction::Consume);
+    assert_eq!(
+        plugin.take_close_session_request(),
+        Some(0),
+        "cierra su terminal real, no el visor muerto"
+    );
+    assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
 }

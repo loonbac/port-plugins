@@ -154,28 +154,13 @@ impl HerdrPlugin {
         });
 
         s.active_space_index = s.spaces.len() - 1;
-        s.new_session_requested = true;
+        s.pending_shell_tabs.push_back(next_tab);
     }
 
     /// Crea una nueva pestaña dentro del espacio actualmente activo.
     pub fn create_tab_in_active_space(&self) {
         let mut s = self.state.write().unwrap();
-        let tab_id = s.next_tab_id;
-        s.next_tab_id += 1;
-
-        let space_idx = s.active_space_index;
-        if let Some(space) = s.spaces.get_mut(space_idx) {
-            space.tabs.push(HerdrTab {
-                id: tab_id,
-                title: format!("term {}", space.tabs.len() + 1),
-                session_id: PENDING_SESSION, // on_session_created lo reemplaza
-                app: None,
-                title_locked: false,
-                watching: None,
-            });
-            space.active_tab_index = space.tabs.len() - 1;
-            s.new_session_requested = true;
-        }
+        s.create_pending_tab_in_active_space();
     }
 
     /// Cambia a la pestaña anterior dentro del espacio actual.
@@ -270,21 +255,23 @@ impl HerdrPlugin {
     /// Pide al núcleo cerrar la sesión del visor que ocupa la pestaña activa.
     ///
     /// Devuelve `false` en una pestaña normal, para que su atajo siga su curso.
-    /// Cerrar la sesión del visor es lo único que hace salir del visor: el
-    /// núcleo avisa con `on_session_closed` y ahí la pestaña se restaura.
+    /// La pestaña se restaura EN EL ACTO, no cuando llegue `on_session_closed`:
+    /// el host cierra la sesión por petición sin notificar a los plugins, así
+    /// que esperar al callback dejaría la pestaña con un id muerto.
     pub fn request_viewer_close(&self) -> bool {
         let mut s = self.state.write().unwrap();
-        let viewer_session_id = s
+        let target = s
             .spaces
             .get(s.active_space_index)
             .and_then(|space| space.tabs.get(space.active_tab_index))
-            .and_then(HerdrTab::viewer_session_id);
-        match viewer_session_id {
-            Some(session_id) => {
+            .map(|tab| (tab.id, tab.viewer_session_id()));
+        match target {
+            Some((tab_id, Some(session_id))) => {
                 s.close_session_requested = Some(session_id);
+                s.restore_watched_tab(tab_id);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -294,28 +281,14 @@ impl HerdrPlugin {
     /// cerrar la sesión del visor y `on_session_closed` la devuelve a su
     /// terminal original.
     pub fn close_active_tab(&self) -> bool {
-        if self.request_viewer_close() {
-            return true;
-        }
         let mut s = self.state.write().unwrap();
         let space_idx = s.active_space_index;
-        let mut closed_session = None;
-        if let Some(space) = s.spaces.get_mut(space_idx) {
-            if space.tabs.len() > 1 {
-                let tab_idx = space.active_tab_index;
-                let removed_tab = space.tabs.remove(tab_idx);
-                closed_session = Some(removed_tab.session_id);
-                if space.active_tab_index >= space.tabs.len() {
-                    space.active_tab_index = space.tabs.len() - 1;
-                }
-            }
-        }
-        if let Some(sess_id) = closed_session {
-            s.close_session_requested = Some(sess_id);
-            true
-        } else {
-            false
-        }
+        let tab_idx = s
+            .spaces
+            .get(space_idx)
+            .map(|space| space.active_tab_index)
+            .unwrap_or(0);
+        s.close_tab_at(space_idx, tab_idx)
     }
 
     /// Guarda la configuración actual en la ruta predeterminada (`~/.config/port/config.md`).
@@ -385,17 +358,29 @@ impl Plugin for HerdrPlugin {
         }
         if let Some(spaces_str) = config.get("spaces") {
             let mut parsed_spaces = Vec::new();
+            let mut pending_shells = Vec::new();
             for (idx, entry) in spaces_str.split(',').enumerate() {
                 if let Some((name, branch)) = entry.trim().split_once(':') {
                     if !name.trim().is_empty() {
+                        // La sesión 0 solo se reutiliza si sigue viva: un
+                        // recargado después de que muriera ataría una pestaña
+                        // nueva a un id muerto. Los espacios siguientes siempre
+                        // nacen pendientes.
+                        let is_first = parsed_spaces.is_empty();
+                        let use_session_zero = is_first && !s.closed_sessions.contains(&0);
+                        let session_id = if use_session_zero { 0 } else { PENDING_SESSION };
+                        let tab_id = idx + 1;
+                        if !use_session_zero {
+                            pending_shells.push(tab_id);
+                        }
                         parsed_spaces.push(HerdrSpace {
                             name: name.trim().to_string(),
                             branch: branch.trim().to_string(),
                             custom_color: None,
                             tabs: vec![HerdrTab {
-                                id: idx + 1,
+                                id: tab_id,
                                 title: "terminal".to_string(),
-                                session_id: idx,
+                                session_id,
                                 app: None,
                                 title_locked: false,
                                 watching: None,
@@ -406,7 +391,36 @@ impl Plugin for HerdrPlugin {
                 }
             }
             if !parsed_spaces.is_empty() {
+                // Resincroniza los contadores: con `next_tab_id` viejo, el `+` o
+                // `Ctrl+Shift+T` crearían una pestaña con un id ya declarado y
+                // `tab_by_id_mut` enlazaría al primero que coincida.
+                let max_tab = parsed_spaces
+                    .iter()
+                    .flat_map(|space| space.tabs.iter().map(|tab| tab.id))
+                    .max()
+                    .unwrap_or(0);
+                let max_space_num = parsed_spaces
+                    .iter()
+                    .filter_map(|space| space.name.strip_prefix("space-"))
+                    .filter_map(|num| num.parse::<usize>().ok())
+                    .max()
+                    .unwrap_or(0);
+                s.next_tab_id = max_tab + 1;
+                s.next_space_num = parsed_spaces.len().max(max_space_num) + 1;
                 s.spaces = parsed_spaces;
+                // El índice activo no puede quedar fuera del vector nuevo.
+                s.active_space_index = if s.spaces.is_empty() {
+                    0
+                } else {
+                    s.active_space_index.min(s.spaces.len() - 1)
+                };
+                // Un recargado no puede dejar peticiones apuntando a pestañas
+                // que ya no existen.
+                s.pending_shell_tabs = pending_shells.into_iter().collect();
+                s.in_flight = None;
+                s.pending_viewer_tab = None;
+                s.pending_watch = None;
+                s.pending_viewer_title = None;
             }
         }
     }

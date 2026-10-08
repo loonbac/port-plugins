@@ -14,7 +14,6 @@ use port_term_core::frame::Rgb;
 
 use crate::color::to_hsla;
 use crate::identity::tab_identity;
-use crate::state::HerdrTab;
 use crate::HerdrPlugin;
 
 pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
@@ -136,18 +135,10 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                         move |_event, window: &mut Window, _cx| {
                             let mut s = state_for_close.write().unwrap();
                             let space_idx = s.active_space_index;
-                            let mut closed_session = None;
-                            if let Some(sp) = s.spaces.get_mut(space_idx) {
-                                if sp.tabs.len() > 1 && i < sp.tabs.len() {
-                                    let removed = sp.tabs.remove(i);
-                                    closed_session = Some(removed.session_id);
-                                    if sp.active_tab_index >= sp.tabs.len() {
-                                        sp.active_tab_index = sp.tabs.len() - 1;
-                                    }
-                                }
-                            }
-                            if let Some(sess_id) = closed_session {
-                                s.close_session_requested = Some(sess_id);
+                            // Mismo cierre que `Ctrl+W`/`close_active_tab`, en un
+                            // solo lugar: una pestaña del visor se restaura, no
+                            // se borra.
+                            if s.close_tab_at(space_idx, i) {
                                 window.refresh();
                             }
                         },
@@ -173,21 +164,9 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             MouseButton::Left,
             move |_event, window: &mut Window, _cx| {
                 let mut s = state_for_new.write().unwrap();
-                let next_id = s.next_tab_id;
-                s.next_tab_id += 1;
-                let space_idx = s.active_space_index;
-                if let Some(sp) = s.spaces.get_mut(space_idx) {
-                    sp.tabs.push(HerdrTab {
-                        id: next_id,
-                        title: format!("term {}", sp.tabs.len() + 1),
-                        session_id: 0,
-                        app: None,
-                        title_locked: false,
-                        watching: None,
-                    });
-                    sp.active_tab_index = sp.tabs.len() - 1;
-                    s.new_session_requested = true;
-                }
+                // La pestaña nace pendiente: nunca hereda la sesión 0 de otra
+                // pestaña mientras el núcleo no le crea la suya.
+                s.create_pending_tab_in_active_space();
                 window.refresh();
             },
         )
