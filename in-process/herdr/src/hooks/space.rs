@@ -8,7 +8,6 @@ use std::path::Path;
 use port_plugin_api::SpaceHook;
 use port_term_core::pty::{PtyConfig, RunningApp};
 
-use crate::identity::detect_git_branch;
 use crate::state::{default_space, InFlight, WatchedTab, PENDING_SESSION};
 use crate::viewer;
 use crate::HerdrPlugin;
@@ -226,6 +225,7 @@ impl SpaceHook for HerdrPlugin {
         for tab_id in removed_tabs {
             s.forget_tab(tab_id);
         }
+        s.session_cwds.remove(&session_id);
 
         // Un espacio sin pestañas deja de existir. El activo se conserva por
         // aritmética de índices, no por nombre: varias carpetas pueden llamarse
@@ -264,46 +264,49 @@ impl SpaceHook for HerdrPlugin {
 
     fn update_session_cwd(&self, session_id: usize, cwd: &Path, folder_name: &str) {
         let mut s = self.state.write().unwrap();
-        for space in s.spaces.iter_mut() {
-            // Solo el espacio propietario de la sesión se renombra. Una pestaña
-            // con título bloqueado (el visor de un subagente) no cuenta como
-            // dueña: su sesión vive dentro del espacio del usuario, y dejar que
-            // su cwd renombrara el espacio pisaría el contexto que el usuario ya
-            // tenía. El nombre del subagente vive en la pestaña, no en el
-            // espacio.
-            let contains_session = space.tabs.iter().any(|t| {
+        s.session_cwds.insert(session_id, cwd.to_path_buf());
+
+        let space_idx = s.spaces.iter().position(|space| {
+            space.tabs.iter().any(|t| {
                 t.session_id == session_id
                     && t.session_id != PENDING_SESSION
                     && !t.title_locked
                     && t.viewer_session_id() != Some(session_id)
-            });
-            if !contains_session {
-                continue;
-            }
+            })
+        });
+        let Some(space_idx) = space_idx else {
+            return;
+        };
 
-            // El espacio propietario de la sesión se renombra con la carpeta.
-            if !folder_name.is_empty() {
-                space.name = folder_name.to_string();
-            }
+        let cached_branch = s.git_branch_cache.get(cwd).map(|(b, _)| b.clone());
+        let space = &mut s.spaces[space_idx];
 
-            // Si la pestaña tiene nombre por defecto, se actualiza con la carpeta.
-            // La pestaña del visor queda fuera: su título es el nombre del
-            // subagente que se está mirando, no la carpeta del shell, y
-            // pisarlo borraría justo el dato que el usuario abrió a ver.
-            for tab in space.tabs.iter_mut() {
-                if tab.session_id == session_id
-                    && tab.session_id != PENDING_SESSION
-                    && !tab.title_locked
-                    && tab.viewer_session_id() != Some(session_id)
-                    && (tab.title == "terminal" || tab.title.starts_with("term "))
-                {
-                    tab.title = folder_name.to_string();
-                }
-            }
+        // El espacio propietario de la sesión se renombra con la carpeta.
+        if !folder_name.is_empty() {
+            space.name = folder_name.to_string();
+        }
 
-            // Detecta automáticamente la rama git si la carpeta está en un repositorio.
-            space.branch = detect_git_branch(cwd).unwrap_or_else(|| "local".to_string());
-            break;
+        // Si la pestaña tiene nombre por defecto, se actualiza con la carpeta.
+        // La pestaña del visor queda fuera: su título es el nombre del
+        // subagente que se está mirando, no la carpeta del shell, y
+        // pisarlo borraría justo el dato que el usuario abrió a ver.
+        for tab in space.tabs.iter_mut() {
+            if tab.session_id == session_id
+                && tab.session_id != PENDING_SESSION
+                && !tab.title_locked
+                && tab.viewer_session_id() != Some(session_id)
+                && (tab.title == "terminal" || tab.title.starts_with("term "))
+            {
+                tab.title = folder_name.to_string();
+            }
+        }
+
+        // Lee la rama desde la caché ya publicada por el hilo en segundo plano.
+        // Si el cwd aún no ha sido escaneado, se mantiene la rama actual
+        // hasta que el hilo la publique en su siguiente ciclo (~250-300 ms).
+        // INVARIANTE: el hook NUNCA invoca detect_git_branch ni realiza llamadas de sistema.
+        if let Some(branch) = cached_branch {
+            space.branch = branch;
         }
     }
 }

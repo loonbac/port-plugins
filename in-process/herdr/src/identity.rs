@@ -103,8 +103,12 @@ fn humanize(bin: &str) -> String {
     }
 }
 
+pub(crate) static GIT_BRANCH_READS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 /// Detecta la rama activa de git leyendo directamente `.git/HEAD` sin invocar subprocesos.
 pub(crate) fn detect_git_branch(cwd: &Path) -> Option<String> {
+    GIT_BRANCH_READS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut current = Some(cwd);
     while let Some(dir) = current {
         let git_head = dir.join(".git").join("HEAD");

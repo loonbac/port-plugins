@@ -24,16 +24,10 @@ const RESIZE_HANDLE_HIT: f32 = 7.0;
 
 pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let state = plugin.state.read().unwrap();
-    // Subagentes de pi, leidos en vivo. Se consultan ANTES del gate: si
-    // hay alguno visible, la sidebar tiene que aparecer aunque solo haya un
-    // espacio, que es el estado normal de una terminal recien abierta.
-    // El reloj se toma una sola vez por render y se reutiliza en la lista.
-    let now = agents::now_ms();
-
     // El mismo criterio que reserva el ancho de la barra decide si se pinta
     // (ver `sidebar_shown`). Si sólo hay un espacio y no hay subagentes
     // visibles, la terminal es limpia.
-    if !plugin.sidebar_shown(&state, now) {
+    if !plugin.sidebar_shown(&state) {
         return None;
     }
 
@@ -127,15 +121,15 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     // igual que el resto de filas pulsables de este archivo.
     let state_for_agent_rows = Arc::clone(&plugin.state);
     let agent_rows = {
-        let mut guard = plugin
+        let guard = plugin
             .agents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         // El clic necesita el directorio de presencia para construir el
-        // comando del visor; se copia antes del préstamo mutable.
+        // comando del visor; se copia antes del préstamo.
         let presence_dir = guard.presence_dir().to_path_buf();
         guard
-            .visible(now, agents::DEFAULT_VISIBLE_LIMIT)
+            .snapshot_visible(agents::DEFAULT_VISIBLE_LIMIT)
             .into_iter()
             .map(|entry| {
                 let dot = if entry.status.is_live() {

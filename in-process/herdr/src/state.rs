@@ -3,13 +3,13 @@
 //! Única responsabilidad: describir los espacios, sus pestañas y el visor de un
 //! subagente, junto con las operaciones que mantienen ese estado coherente.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use port_term_core::frame::Rgb;
 use port_term_core::pty::RunningApp;
 
-use crate::color::{parse_hex_color, system_accent_color};
+use crate::color::system_accent_color;
 
 /// Estado original de una pestaña que el visor de un subagente está ocupando.
 ///
@@ -71,6 +71,10 @@ impl HerdrTab {
 /// Identificador centinela para una pestaña que todavía no tiene sesión asignada.
 /// Nunca colisiona con un id real de `SessionManager`, que empieza en 0.
 pub const PENDING_SESSION: usize = usize::MAX;
+/// Tiempo de vida de la caché del color de acento del sistema en milisegundos.
+pub const ACCENT_TTL_MS: u64 = 2_000;
+/// Tiempo de vida de la caché de la rama git por directorio en milisegundos.
+pub const GIT_BRANCH_TTL_MS: u64 = 3_000;
 /// Ancho por defecto de la barra lateral de espacios, en píxeles lógicos.
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 236.0;
 /// Ancho mínimo: por debajo el nombre de las ramas deja de caber.
@@ -183,6 +187,16 @@ pub struct HerdrState {
     pub(crate) resize_start_width: f32,
     pub(crate) next_tab_id: usize,
     pub(crate) next_space_num: usize,
+    /// Color de acento publicado por el hilo de fondo para lecturas de memoria puras sin E/S.
+    pub published_accent: Rgb,
+    /// Indica que el modo de acento cambió y debe republicarse pronto.
+    pub(crate) accent_stale: bool,
+    /// Momento en milisegundos en que el hilo de fondo leyó el acento por última vez.
+    pub(crate) last_accent_fetch_ms: u64,
+    /// Caché del directorio de trabajo de cada sesión para evitar I/O redundante.
+    pub(crate) session_cwds: HashMap<usize, PathBuf>,
+    /// Caché de la rama git por directorio de trabajo: `(rama, timestamp_ms)`.
+    pub(crate) git_branch_cache: HashMap<PathBuf, (String, u64)>,
 }
 
 /// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
@@ -204,15 +218,14 @@ pub(crate) fn default_space() -> HerdrSpace {
 }
 
 impl HerdrState {
-    /// Resuelve el color de acento actual (leyendo el wallpaper si está en modo "auto").
+    /// Resuelve el color de acento actual como lectura pura en memoria.
+    ///
+    /// Invariante crítico: **cero llamadas a sistema y cero E/S de disco**.
+    /// Nunca invoca `read_to_string`, `metadata` ni comandos externos. Devuelve
+    /// directamente el valor publicado por el hilo en segundo plano, por lo que es
+    /// completamente seguro llamarlo mientras se retiene un `RwLockReadGuard`.
     pub fn effective_accent(&self) -> Rgb {
-        if self.accent_mode.to_lowercase() == "auto" {
-            system_accent_color()
-        } else if let Some(rgb) = parse_hex_color(&self.accent_mode) {
-            rgb
-        } else {
-            system_accent_color()
-        }
+        self.published_accent
     }
 
     /// Retargetea la pestaña activa del espacio activo al visor de un subagente
@@ -433,6 +446,11 @@ impl Default for HerdrState {
             resize_start_width: SIDEBAR_DEFAULT_WIDTH,
             next_tab_id: 2,
             next_space_num: 2,
+            published_accent: system_accent_color(),
+            accent_stale: false,
+            last_accent_fetch_ms: crate::agents::now_ms(),
+            session_cwds: HashMap::new(),
+            git_branch_cache: HashMap::new(),
         }
     }
 }

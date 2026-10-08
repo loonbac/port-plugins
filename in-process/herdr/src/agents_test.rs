@@ -311,6 +311,36 @@ fn sin_presencia_no_hay_filas() {
     assert!(watcher.visible(AHORA, DEFAULT_VISIBLE_LIMIT).is_empty());
 }
 
+#[test]
+fn el_layout_no_escanea_la_presencia_en_cada_llamada() {
+    let presence = dir("layout-sin-escaneo");
+    write_session(
+        &presence,
+        HASH,
+        INCARNATION,
+        AHORA,
+        &[task_row(&[("id", "\"a\"")])],
+    );
+
+    let mut watcher = watcher_for(&presence);
+    assert_eq!(watcher.entries(AHORA).len(), 1);
+    let refreshes = watcher.refreshes;
+    assert_eq!(refreshes, 1);
+
+    // Borramos el directorio de presencia
+    fs::remove_dir_all(&presence).expect("borrar presencia");
+
+    // El accessor de la instantánea que usan los hooks no debe tocar el disco ni incrementar refreshes
+    for _ in 0..10 {
+        assert_eq!(watcher.snapshot().len(), 1);
+        assert_eq!(watcher.snapshot_visible(6).len(), 1);
+    }
+    assert_eq!(
+        watcher.refreshes, refreshes,
+        "el accessor de la instantánea no debe incrementar refreshes ni releer el disco"
+    );
+}
+
 // ── Orden y límite ─────────────────────────────────────────────────────────
 
 #[test]

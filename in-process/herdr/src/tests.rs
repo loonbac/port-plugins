@@ -17,6 +17,8 @@ use crate::watch::{clip_last_step, AGENT_STEP_MAX_CHARS};
 
 use super::*;
 
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Presencia vacía aislada del disco real.
 ///
 /// Con la ruta real, un subagente vivo en esta máquina abriría la barra y
@@ -120,9 +122,242 @@ fn ctrl_alt_t_creates_space_and_opens_sidebar() {
 
 #[test]
 fn herdr_accent_reads_system_color() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let plugin = HerdrPlugin::default();
     let accent = plugin.state.read().unwrap().effective_accent();
     assert_eq!(accent, system_accent_color());
+}
+
+#[test]
+fn el_acento_no_se_relee_en_cada_render() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp_home = std::env::temp_dir().join(format!(
+        "herdr-accent-memo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_home);
+    let accent_dir = temp_home.join(".config/mpvpaper");
+    std::fs::create_dir_all(&accent_dir).expect("crear config");
+    let accent_file = accent_dir.join("accent.txt");
+    std::fs::write(&accent_file, "#112233\n").expect("escribir acento 1");
+
+    let prev_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &temp_home);
+
+    let plugin = HerdrPlugin::default();
+    let c1 = plugin.state.read().unwrap().effective_accent();
+    assert_eq!(c1, Rgb::new(0x11, 0x22, 0x33));
+
+    // Cambiamos el archivo de acento en disco
+    std::fs::write(&accent_file, "#445566\n").expect("escribir acento 2");
+
+    // Segunda llamada: debe seguir en caché y no releer el archivo inmediatamente
+    let c2 = plugin.state.read().unwrap().effective_accent();
+    assert_eq!(
+        c2,
+        Rgb::new(0x11, 0x22, 0x33),
+        "el acento debe mantenerse en cache dentro del TTL"
+    );
+
+    // Esperamos a que pase el TTL y refresque el hilo de fondo
+    std::thread::sleep(std::time::Duration::from_millis(crate::state::ACCENT_TTL_MS + 350));
+
+    let c3 = plugin.state.read().unwrap().effective_accent();
+    assert_eq!(
+        c3,
+        Rgb::new(0x44, 0x55, 0x66),
+        "tras vencer el TTL debe releer el nuevo acento"
+    );
+
+    if let Some(h) = prev_home {
+        std::env::set_var("HOME", h);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    let _ = std::fs::remove_dir_all(&temp_home);
+}
+
+#[test]
+fn una_rama_git_memorizada_no_se_vuelve_a_leer() {
+    let repo_dir = std::env::temp_dir().join(format!(
+        "herdr-git-memo-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    let git_dir = repo_dir.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("crear .git");
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature-memo\n").expect("escribir HEAD");
+
+    let plugin = HerdrPlugin::default();
+    plugin.update_session_cwd(0, &repo_dir, "test-repo");
+
+    let start = std::time::Instant::now();
+    while plugin.state.read().unwrap().spaces[0].branch != "feature-memo"
+        && start.elapsed() < std::time::Duration::from_millis(800)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[0].name, "test-repo");
+        assert_eq!(s.spaces[0].branch, "feature-memo");
+    }
+
+    // Borramos .git/HEAD
+    std::fs::remove_file(git_dir.join("HEAD")).expect("borrar HEAD");
+
+    // Segunda llamada con el MISMO cwd: no debe releer el disco y la rama debe mantenerse
+    plugin.update_session_cwd(0, &repo_dir, "test-repo");
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(
+        s.spaces[0].branch, "feature-memo",
+        "la rama memorizada debe conservarse sin volver a leer el disco"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_dir);
+}
+
+#[test]
+fn los_hooks_de_layout_leen_la_instantanea_sin_acceder_al_disco_ni_bloquear() {
+    let presence = seed_watch_agent("snapshot-no-io");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+
+    // Los hooks devuelven el layout con la instantánea en memoria
+    assert!(plugin.left_sidebar_width() > 0.0);
+    assert!(plugin.left_sidebar().is_some());
+
+    // Borramos el directorio de presencia completamente
+    let _ = std::fs::remove_dir_all(&presence);
+
+    // Los hooks siguen respondiendo sin bloquearse ni fallar porque no tocan el disco
+    for _ in 0..10 {
+        assert!(plugin.left_sidebar_width() > 0.0);
+        assert!(plugin.left_sidebar().is_some());
+    }
+}
+
+#[test]
+fn el_acento_del_hook_no_relee_el_disco() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let temp_home = std::env::temp_dir().join(format!(
+        "herdr-accent-no-io-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_home);
+    let accent_dir = temp_home.join(".config/mpvpaper");
+    std::fs::create_dir_all(&accent_dir).expect("crear config");
+    let accent_file = accent_dir.join("accent.txt");
+    std::fs::write(&accent_file, "#112233\n").expect("escribir acento inicial");
+
+    let prev_home = std::env::var("HOME").ok();
+    std::env::set_var("HOME", &temp_home);
+
+    let plugin = HerdrPlugin::default();
+    assert_eq!(plugin.state.read().unwrap().effective_accent(), Rgb::new(0x11, 0x22, 0x33));
+
+    // Cambiamos o borramos el archivo en disco
+    std::fs::write(&accent_file, "#445566\n").expect("escribir nuevo acento");
+
+    // Las llamadas del hook a effective_accent() deben devolver la instantánea publicada
+    // sin hacer E/S de disco
+    for _ in 0..10 {
+        let val = plugin.state.read().unwrap().effective_accent();
+        assert_eq!(
+            val,
+            Rgb::new(0x11, 0x22, 0x33),
+            "effective_accent() debe ser lectura pura en memoria y no releer el disco"
+        );
+    }
+
+    // Tras vencer el TTL y refrescar el hilo en segundo plano, el nuevo acento debe publicarse
+    std::thread::sleep(std::time::Duration::from_millis(crate::state::ACCENT_TTL_MS + 350));
+    let refreshed_val = plugin.state.read().unwrap().effective_accent();
+    assert_eq!(
+        refreshed_val,
+        Rgb::new(0x44, 0x55, 0x66),
+        "el hilo debe publicar el nuevo valor preservando frescura"
+    );
+
+    if let Some(h) = prev_home {
+        std::env::set_var("HOME", h);
+    } else {
+        std::env::remove_var("HOME");
+    }
+    let _ = std::fs::remove_dir_all(&temp_home);
+}
+
+#[test]
+fn la_rama_del_hook_no_relee_el_disco() {
+    let repo_dir = std::env::temp_dir().join(format!(
+        "herdr-git-no-hook-io-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let other_dir = std::env::temp_dir().join(format!(
+        "herdr-git-no-hook-other-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    let _ = std::fs::remove_dir_all(&other_dir);
+    let git_dir = repo_dir.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("crear .git");
+    std::fs::create_dir_all(&other_dir).expect("crear other");
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/feature-async\n").expect("escribir HEAD");
+
+    let plugin = HerdrPlugin::default();
+    plugin.update_session_cwd(0, &repo_dir, "test-repo");
+
+    // Esperamos a que el hilo en segundo plano publique la rama detectada
+    let start = std::time::Instant::now();
+    while plugin.state.read().unwrap().spaces[0].branch != "feature-async"
+        && start.elapsed() < std::time::Duration::from_millis(800)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(plugin.state.read().unwrap().spaces[0].branch, "feature-async");
+
+    // Borramos .git por completo
+    std::fs::remove_dir_all(&git_dir).expect("borrar .git");
+
+    let reads_before = crate::identity::GIT_BRANCH_READS.load(std::sync::atomic::Ordering::SeqCst);
+
+    // Llamamos update_session_cwd para ese cwd y para otro desconocido
+    for _ in 0..10 {
+        plugin.update_session_cwd(0, &repo_dir, "test-repo");
+        plugin.update_session_cwd(0, &other_dir, "other-repo");
+    }
+
+    let reads_after = crate::identity::GIT_BRANCH_READS.load(std::sync::atomic::Ordering::SeqCst);
+
+    // El hook update_session_cwd NO debe invocar detect_git_branch en ningún caso
+    assert_eq!(
+        reads_after, reads_before,
+        "update_session_cwd no debe realizar lecturas de git sincrónicas"
+    );
+
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    let _ = std::fs::remove_dir_all(&other_dir);
 }
 
 #[test]
@@ -130,6 +365,13 @@ fn herdr_space_updates_name_and_branch_from_cwd() {
     let plugin = HerdrPlugin::default();
     let path = std::path::Path::new("/home/loonbac/Proyectos/port");
     plugin.update_session_cwd(0, path, "port");
+
+    let start = std::time::Instant::now();
+    while plugin.state.read().unwrap().spaces[0].branch != "master"
+        && start.elapsed() < std::time::Duration::from_millis(800)
+    {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 
     let s = plugin.state.read().unwrap();
     assert_eq!(s.spaces[0].name, "port");

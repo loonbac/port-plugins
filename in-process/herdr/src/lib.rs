@@ -71,12 +71,28 @@ impl HerdrPlugin {
     /// cambiaba el resultado del test de "terminal limpio" sin que nada en el
     /// código hubiera cambiado.
     pub fn with_presence_dir(presence_dir: impl Into<PathBuf>) -> Self {
+        let mut watcher = agents::AgentWatcher::new(presence_dir);
+        let now = agents::now_ms();
+        watcher.entries(now);
+        let agents = Arc::new(std::sync::Mutex::new(watcher));
+        let mut initial_state = HerdrState::default();
+        initial_state.last_accent_fetch_ms = now;
+        let state = Arc::new(RwLock::new(initial_state));
+        agents::spawn_background_refresher(&agents, &state);
         Self {
-            state: Arc::new(RwLock::new(HerdrState::default())),
-            agents: Arc::new(std::sync::Mutex::new(agents::AgentWatcher::new(
-                presence_dir,
-            ))),
+            state,
+            agents,
         }
+    }
+
+    /// Subagentes de `pi` visibles en la instantánea actual, vivos primero,
+    /// sin realizar operaciones de E/S de disco en el hilo de UI.
+    pub fn visible_agents_snapshot(&self, limit: usize) -> Vec<agents::AgentEntry> {
+        let guard = self
+            .agents
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard.snapshot_visible(limit)
     }
 
     /// Subagentes de `pi` visibles ahora mismo, vivos primero.
@@ -118,15 +134,15 @@ impl HerdrPlugin {
     /// Cuenta tanto los subagentes vivos como los terminados dentro de su gracia
     /// a propósito: los subagentes acaban casi siempre tan rápidos que, sin esa
     /// gracia, la barra se borraba a los pocos segundos de mostrarse.
-    fn sidebar_shown(&self, state: &HerdrState, now_ms: u64) -> bool {
+    fn sidebar_shown(&self, state: &HerdrState) -> bool {
         if state.spaces.len() > 1 {
             return true;
         }
-        let mut guard = self
+        let guard = self
             .agents
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        !guard.entries(now_ms).is_empty()
+        !guard.snapshot().is_empty()
     }
 
     /// Crea un nuevo espacio aparte del actual, solicita una nueva sesión PTY y lo activa.
@@ -351,6 +367,10 @@ impl Plugin for HerdrPlugin {
         }
         if let Some(acc) = config.get("accent") {
             s.accent_mode = acc.to_string();
+            s.accent_stale = true;
+            if let Some(rgb) = parse_hex_color(&s.accent_mode) {
+                s.published_accent = rgb;
+            }
         }
         if let Some(width) = config.get_f32("sidebar_width") {
             s.sidebar_width = width.clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);

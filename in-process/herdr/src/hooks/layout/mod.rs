@@ -7,7 +7,6 @@ use gpui::AnyElement;
 
 use port_plugin_api::LayoutHook;
 
-use crate::agents;
 use crate::HerdrPlugin;
 
 mod sidebar;
@@ -16,7 +15,7 @@ mod topbar;
 impl LayoutHook for HerdrPlugin {
     fn left_sidebar_width(&self) -> f32 {
         let s = self.state.read().unwrap();
-        if self.sidebar_shown(&s, agents::now_ms()) {
+        if self.sidebar_shown(&s) {
             s.sidebar_width
         } else {
             0.0
