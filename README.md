@@ -133,6 +133,9 @@ Notable behaviour:
 - Sidebar and tab bar share the terminal background and opacity, and pick up the
   accent colour extracted from your wallpaper.
 - The sidebar edge is draggable to resize it.
+- Long folder names, branch names and tab titles are truncated with `…` instead
+  of overflowing the sidebar or the tab bar. The new-tab button stays at the
+  right end of the tab bar, so it remains reachable with many tabs open.
 
 ### `close-guard`
 
