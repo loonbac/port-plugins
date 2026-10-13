@@ -135,6 +135,10 @@ Comportamiento destacado:
 - La barra lateral y la barra de pestañas comparten el fondo y la opacidad de la
   terminal, y toman el color de acento extraído del wallpaper.
 - El borde de la barra lateral se puede arrastrar para cambiar su ancho.
+- Los nombres de carpeta, ramas y títulos de pestaña largos se recortan con `…`
+  en vez de desbordar la barra lateral o la de pestañas. El botón de nueva
+  pestaña queda anclado al extremo derecho, así que sigue alcanzable con muchas
+  pestañas abiertas.
 
 ### `close-guard`
 
