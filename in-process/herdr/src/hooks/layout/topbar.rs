@@ -16,6 +16,11 @@ use crate::color::to_hsla;
 use crate::identity::tab_identity;
 use crate::HerdrPlugin;
 
+/// Ancho mínimo de una pestaña, en píxeles lógicos: el marcador, el cierre y unas
+/// pocas letras del título, con icono o sin él. Por debajo de esto el título se
+/// queda en `…` y el cierre se aprieta, así que una pestaña deja de leerse.
+const TAB_MIN_WIDTH: f32 = 96.0;
+
 pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let state = plugin.state.read().unwrap();
     let space_tabs = match state.spaces.get(state.active_space_index) {
@@ -38,7 +43,19 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let term_bg = to_hsla(Rgb::DEFAULT_BG);
     drop(state);
 
-    let mut tabs_row = div().flex().flex_row().items_center().gap(px(6.0));
+    // La tira de pestañas no empuja la barra: toma el ancho que sobra
+    // (`flex_1`), puede encogerse por debajo de su contenido (`min_w_0`) y
+    // recorta lo que aun así no quepa. Cada pestaña cede con `…` (ver
+    // `tab_pill`) y el botón de nueva pestaña vive fuera de la tira, para
+    // seguir alcanzable cuando hay muchas.
+    let mut tabs_row = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .flex_1()
+        .min_w_0()
+        .overflow_hidden();
 
     for (i, tab) in space_tabs.iter().enumerate() {
         let is_active = i == active_tab_idx;
@@ -50,6 +67,9 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
 
         let state_for_click = Arc::clone(&plugin.state);
         let state_for_close = Arc::clone(&plugin.state);
+        // Claves de las pruebas de layout (ver `layout_test`).
+        let tab_key = format!("herdr-topbar-tab-{i}");
+        let label_key = format!("herdr-topbar-tab-label-{i}");
         let tab_pill = div()
             .flex()
             .flex_row()
@@ -61,6 +81,10 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .bg(bg_col)
             .border_1()
             .border_color(border_col)
+            .flex_shrink()
+            .min_w(px(TAB_MIN_WIDTH))
+            .overflow_hidden()
+            .debug_selector(move || tab_key)
             .on_mouse_down(
                 MouseButton::Left,
                 move |_event, window: &mut Window, _cx| {
@@ -74,6 +98,7 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             )
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(px(12.0))
                     .text_color(if is_active {
                         accent
@@ -89,8 +114,10 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                     .flex_row()
                     .items_center()
                     .gap(px(6.0))
+                    .min_w_0()
                     .child(
                         div()
+                            .flex_shrink_0()
                             .text_size(px(12.0))
                             .text_color(accent)
                             .child(icon.to_string()),
@@ -103,6 +130,8 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             } else {
                                 FontWeight::NORMAL
                             })
+                            .truncate()
+                            .debug_selector(move || label_key)
                             .text_color(if is_active {
                                 rgb(0xf0f6fc)
                             } else {
@@ -119,6 +148,8 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                     } else {
                         FontWeight::NORMAL
                     })
+                    .truncate()
+                    .debug_selector(move || label_key)
                     .text_color(if is_active {
                         rgb(0xf0f6fc)
                     } else {
@@ -128,6 +159,7 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             })
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_size(px(11.0))
                     .text_color(rgb(0x6e7681))
                     .on_mouse_down(
@@ -160,6 +192,7 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         .bg(accent.opacity(0.15))
         .border_1()
         .border_color(accent.opacity(0.35))
+        .debug_selector(|| "herdr-topbar-new-tab".to_string())
         .on_mouse_down(
             MouseButton::Left,
             move |_event, window: &mut Window, _cx| {
@@ -172,8 +205,6 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         )
         .child(div().text_size(px(13.0)).text_color(accent).child("+"));
 
-    tabs_row = tabs_row.child(add_tab_btn);
-
     let top_bar = div()
         .h(px(38.0))
         .w_full()
@@ -184,7 +215,14 @@ pub(super) fn top_bar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         .flex()
         .flex_row()
         .items_center()
-        .child(tabs_row);
+        .gap(px(6.0))
+        // Red de seguridad: nada se dibuja fuera de la barra.
+        .overflow_hidden()
+        .debug_selector(|| "herdr-topbar".to_string())
+        .child(tabs_row)
+        // Fuera de la tira recortada: con muchas pestañas sigue visible y
+        // pulsable en lugar de quedar empujado fuera de la ventana.
+        .child(add_tab_btn);
 
     Some(top_bar.into_any_element())
 }

@@ -10,3 +10,9 @@ port-plugin-api = { workspace = true }
 port-term-core = { workspace = true }
 gpui = { workspace = true }
 serde_json = { workspace = true }
+
+# La ventana de prueba de GPUI (`TestAppContext`) y `debug_bounds` viven detrás
+# de esa feature: sin ella `debug_selector` es un no-op y las pruebas de layout
+# no tendrían nada que medir. Solo afecta a las compilaciones de prueba.
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
