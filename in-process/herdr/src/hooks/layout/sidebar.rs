@@ -74,20 +74,42 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 },
             )
             .child(
+                // El ancho lo decide la barra, nunca el nombre: `flex_1` toma
+                // el espacio disponible, `min_w_0` deja encogerse por debajo
+                // del contenido y `truncate` recorta con `…` en vez de
+                // desbordar el panel.
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
                     .gap(px(10.0))
-                    .child(div().w(px(8.0)).h(px(8.0)).rounded(px(4.0)).bg(dot_color))
+                    .flex_1()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .w(px(8.0))
+                            .h(px(8.0))
+                            .rounded(px(4.0))
+                            .bg(dot_color),
+                    )
                     .child(
                         div()
                             .flex()
                             .flex_col()
+                            .flex_1()
+                            .min_w_0()
                             .child(
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(FontWeight::BOLD)
+                                    .truncate()
+                                    // Clave de las pruebas de layout (ver
+                                    // `layout_test`): permite medir que el
+                                    // texto no sale del panel.
+                                    .debug_selector(move || {
+                                        format!("herdr-sidebar-space-name-{i}")
+                                    })
                                     .text_color(if is_active {
                                         rgb(0xf0f6fc)
                                     } else {
@@ -98,6 +120,10 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             .child(
                                 div()
                                     .text_size(px(11.0))
+                                    .truncate()
+                                    .debug_selector(move || {
+                                        format!("herdr-sidebar-space-branch-{i}")
+                                    })
                                     .text_color(if is_active {
                                         accent
                                     } else {
@@ -142,6 +168,11 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 let row_entry = entry.clone();
                 let state_for_click = Arc::clone(&state_for_agent_rows);
                 let presence_dir_for_click = presence_dir.clone();
+                // Claves de las pruebas de layout: identifican cada texto de la
+                // tarjeta por el id de la tarea (ver `layout_test`).
+                let name_key = format!("herdr-sidebar-agent-name-{}", entry.id);
+                let label_key = format!("herdr-sidebar-agent-label-{}", entry.id);
+                let step_key = format!("herdr-sidebar-agent-step-{}", entry.id);
                 div()
                     .flex()
                     .flex_col()
@@ -164,22 +195,38 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                         },
                     )
                     .child(
+                        // Igual que en SPACES: el nombre cede ancho antes de
+                        // empujar el estado fuera de la tarjeta. `flex_shrink_0`
+                        // en el punto y en el estado los deja intactos.
                         div()
                             .flex()
                             .flex_row()
                             .items_center()
                             .justify_between()
+                            .gap(px(6.0))
+                            .min_w_0()
                             .child(
                                 div()
                                     .flex()
                                     .flex_row()
                                     .items_center()
                                     .gap(px(6.0))
-                                    .child(div().w(px(6.0)).h(px(6.0)).rounded(px(3.0)).bg(dot))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .w(px(6.0))
+                                            .h(px(6.0))
+                                            .rounded(px(3.0))
+                                            .bg(dot),
+                                    )
                                     .child(
                                         div()
                                             .text_size(px(12.0))
                                             .font_weight(FontWeight::BOLD)
+                                            .truncate()
+                                            .debug_selector(move || name_key)
                                             .text_color(if entry.status.is_live() {
                                                 rgb(0xf0f6fc)
                                             } else {
@@ -189,7 +236,14 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     ),
                             )
                             .child(
+                                // El estado se pinta entero cuando es corto
+                                // ("running"), pero `Unknown` trae texto crudo
+                                // de la presencia: se acota para que no empuje
+                                // el nombre fuera de la tarjeta.
                                 div()
+                                    .flex_shrink_0()
+                                    .max_w(px(72.0))
+                                    .truncate()
                                     .text_size(px(10.0))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(if entry.status.is_live() {
@@ -200,16 +254,23 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     .child(entry.status.label()),
                             ),
                     )
-                    .child(div().text_size(px(11.0)).text_color(rgb(0x8b949e)).child(
-                        if entry.label.is_empty() {
-                            entry.id.clone()
-                        } else {
-                            entry.label.clone()
-                        },
-                    ))
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .truncate()
+                            .debug_selector(move || label_key)
+                            .text_color(rgb(0x8b949e))
+                            .child(if entry.label.is_empty() {
+                                entry.id.clone()
+                            } else {
+                                entry.label.clone()
+                            }),
+                    )
                     .child(
                         div()
                             .text_size(px(10.0))
+                            .truncate()
+                            .debug_selector(move || step_key)
                             .text_color(rgb(0x6e7681))
                             .child(clip_last_step(&entry.last_step)),
                     )
@@ -228,6 +289,11 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         .border_r(px(1.0))
         .border_color(accent.opacity(0.30))
         .p(px(12.0))
+        // Red de seguridad: aunque una fila futura olvide recortar su texto,
+        // nada se dibuja fuera del borde del panel.
+        .overflow_hidden()
+        // Clave de las pruebas de layout (ver `layout_test`).
+        .debug_selector(|| "herdr-sidebar".to_string())
         .flex()
         .flex_col()
         .justify_between()
@@ -311,6 +377,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 .px(px(6.0))
                 .py(px(6.0))
                 .text_size(px(11.0))
+                .truncate()
                 .text_color(rgb(0x6e7681))
                 .child("Ctrl+Alt+T Nuevo espacio"),
         );

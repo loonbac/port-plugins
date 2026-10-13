@@ -31,6 +31,9 @@ mod watch;
 mod agents_test;
 
 #[cfg(test)]
+mod layout_test;
+
+#[cfg(test)]
 mod presence_test;
 
 #[cfg(test)]

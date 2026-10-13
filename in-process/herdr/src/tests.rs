@@ -24,7 +24,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// Con la ruta real, un subagente vivo en esta máquina abriría la barra y
 /// los tests que esperan una terminal limpia fallarían sin que nada en el
 /// código hubiera cambiado.
-fn empty_presence(tag: &str) -> PathBuf {
+pub(crate) fn empty_presence(tag: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "herdr-vacio-{tag}-{}-{:?}",
         std::process::id(),
@@ -576,6 +576,24 @@ const WATCH_INCARNATION: &str = "81a8a249-55b7-4b19-bddd-f1db0fb2dd69";
 /// presencia, que es la única fuente que existe mientras el subagente corre.
 /// Devuelve la ruta de presencia que espera el plugin.
 fn seed_watch_agent(name: &str) -> PathBuf {
+    seed_watch_agent_with(
+        name,
+        "gentle-ai-worker",
+        "herdr viewer",
+        "reading the presence",
+        "t_abc123",
+    )
+}
+
+/// Igual que [`seed_watch_agent`], con el agente, la etiqueta, el último paso y
+/// el id de la tarea a medida. Las pruebas de layout necesitan textos largos.
+pub(crate) fn seed_watch_agent_with(
+    name: &str,
+    agent: &str,
+    label: &str,
+    last_step: &str,
+    task_id: &str,
+) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
         "herdr-viewer-{name}-{}-{:?}",
         std::process::id(),
@@ -595,7 +613,7 @@ fn seed_watch_agent(name: &str) -> PathBuf {
     )
     .expect("escribir header");
     let activity = format!(
-        "{{\"schema\":1,\"sessionHash\":\"{WATCH_HASH}\",\"incarnation\":\"{WATCH_INCARNATION}\",\"generation\":1,\"activity\":{{\"tasks\":[{{\"summary\":{{\"id\":\"t_abc123\",\"agent\":\"gentle-ai-worker\",\"label\":\"herdr viewer\",\"status\":\"running\",\"lastStep\":\"reading the presence\",\"createdAt\":1,\"startedAt\":2,\"endedAt\":null,\"lastActivityAt\":{now}}}}}]}}}}"
+        "{{\"schema\":1,\"sessionHash\":\"{WATCH_HASH}\",\"incarnation\":\"{WATCH_INCARNATION}\",\"generation\":1,\"activity\":{{\"tasks\":[{{\"summary\":{{\"id\":\"{task_id}\",\"agent\":\"{agent}\",\"label\":\"{label}\",\"status\":\"running\",\"lastStep\":\"{last_step}\",\"createdAt\":1,\"startedAt\":2,\"endedAt\":null,\"lastActivityAt\":{now}}}}}]}}}}"
     );
     std::fs::write(
         presence.join(format!("{WATCH_HASH}.{WATCH_INCARNATION}.activity.json")),
