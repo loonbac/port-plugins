@@ -1,0 +1,14 @@
+[package]
+name = "port-plugin-mobile"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cliente móvil de PORT: sirve la PWA y habla el protocolo remoto"
+
+[lib]
+name = "port_plugin_mobile"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { workspace = true }
