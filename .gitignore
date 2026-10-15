@@ -1,1 +1,4 @@
-/target
+# Artefactos de compilación. La regla va sin anclar a propósito: hay crates
+# fuera del workspace (plugins/herdr-cli, que se construye solo) y cada uno
+# genera su propio `target`, que un `/target` anclado a la raíz no cubriría.
+target/
