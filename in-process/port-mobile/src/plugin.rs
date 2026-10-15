@@ -9,29 +9,82 @@
 //! Acá no hay red: el servidor y el socket viven aparte y sólo comparten este
 //! puente. Por eso el plugin se prueba sin abrir un puerto.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use port_plugin_api::{Plugin, SpaceHook};
+use port_plugin_api::{Plugin, Ret, Services, SpaceHook};
 use port_term_core::frame::{Frame, Rgb};
 use port_term_core::session::GridSize;
 
 use crate::bridge::Bridge;
-use crate::protocol::{CursorView, RowUpdate, WireRun};
+use crate::protocol::{CursorView, Layout, RowUpdate, WireRun};
+use crate::socket::InitialView;
+
+/// Identificador del servicio que publica el modelo de espacios.
+///
+/// Es el `id` del plugin que lo publica. Está acá porque quien consume no puede
+/// conocer su tipo, y una prueba con un servicio de mentira cubre el camino
+/// completo: si el productor cambiara su identificador, esa prueba lo dice.
+const LAYOUT_SERVICE_ID: &str = "herdr";
+/// Acción que devuelve el modelo.
+const LAYOUT_ACTION: &str = "layout";
 
 /// Plugin que lleva la terminal al teléfono.
 pub struct MobilePlugin {
     bridge: Arc<Bridge>,
+    /// Directorio de servicios, que llega al registrarse.
+    ///
+    /// Se guarda porque el modelo se pide después, cuando un cliente entra: para
+    /// entonces todos los plugins ya publicaron lo suyo.
+    services: Mutex<Option<Arc<Services>>>,
 }
 
 impl MobilePlugin {
     /// Crea el plugin sobre un puente ya construido.
     pub fn new(bridge: Arc<Bridge>) -> Self {
-        Self { bridge }
+        Self {
+            bridge,
+            services: Mutex::new(None),
+        }
     }
 
     /// El puente compartido, para que quien arme el servidor lo use.
     pub fn bridge(&self) -> Arc<Bridge> {
         Arc::clone(&self.bridge)
+    }
+
+    /// Lo que un cliente nuevo necesita saber al entrar.
+    ///
+    /// El modelo se pide al plugin que lo tiene y la sesión inicial es la que el
+    /// escritorio tiene a la vista, para que el teléfono empiece donde uno está.
+    pub fn view(&self) -> InitialView {
+        let layout = self.layout();
+        let session = layout
+            .spaces
+            .get(layout.active_space)
+            .and_then(|space| space.tabs.get(space.active_tab))
+            .map(|tab| tab.session)
+            .unwrap_or(0);
+        InitialView { layout, session }
+    }
+
+    /// El modelo de espacios, pedido a quien lo publica.
+    ///
+    /// Sin servicio o con una respuesta que no se entiende se devuelve un modelo
+    /// vacío: un teléfono sin espacios configurados es peor que nada, pero mucho
+    /// mejor que una terminal que no abre.
+    fn layout(&self) -> Layout {
+        let Some(services) = self
+            .services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        else {
+            return Layout::default();
+        };
+        match services.call(LAYOUT_SERVICE_ID, LAYOUT_ACTION, &[]) {
+            Ok(Ret::Text(json)) => serde_json::from_str(&json).unwrap_or_default(),
+            _ => Layout::default(),
+        }
     }
 }
 
@@ -46,6 +99,13 @@ impl Plugin for MobilePlugin {
 
     fn space_hook(&self) -> Option<&dyn SpaceHook> {
         Some(self)
+    }
+
+    fn attach_services(&self, services: Arc<Services>) {
+        *self
+            .services
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(services);
     }
 }
 
@@ -114,7 +174,8 @@ fn hex(color: Rgb) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ClientMessage, ServerMessage};
+    use crate::protocol::{AgentView, ClientMessage, ServerMessage};
+    use port_plugin_api::{Arg, Service, ServiceError};
     use port_term_core::frame::{Row, Run, Style};
     use std::sync::mpsc::{channel, Receiver};
 
@@ -254,5 +315,91 @@ mod tests {
             plugin.take_session_input().is_empty(),
             "el anfitrión no puede recibirla dos veces"
         );
+    }
+
+    /// Servicio de prueba que responde el modelo, como lo hace el plugin herdr.
+    struct StubLayout;
+
+    impl Service for StubLayout {
+        fn id(&self) -> &str {
+            LAYOUT_SERVICE_ID
+        }
+
+        fn name(&self) -> &str {
+            "stub"
+        }
+
+        fn actions(&self) -> Vec<&'static str> {
+            vec![LAYOUT_ACTION]
+        }
+
+        fn invoke(&self, action: &str, _args: &[Arg]) -> Option<Result<Ret, ServiceError>> {
+            if action != LAYOUT_ACTION {
+                return None;
+            }
+            Some(Ok(Ret::Text(
+                r#"{"spaces":[{"name":"espacio","branch":"main","color":null,"active_tab":0,"agent":"blocked","tabs":[{"title":"terminal","session":7,"agent":"blocked","seen":false}]}],"active_space":0}"#
+                    .to_string(),
+            )))
+        }
+    }
+
+    /// El modelo se pide al servicio y la sesión inicial sale de su pestaña activa.
+    #[test]
+    fn el_modelo_se_pide_al_servicio() {
+        let services = Arc::new(Services::new());
+        services.publish(Arc::new(StubLayout));
+        let plugin = MobilePlugin::new(Arc::new(Bridge::new()));
+        plugin.attach_services(services);
+
+        let view = plugin.view();
+
+        assert_eq!(view.session, 7, "la sesión inicial es la pestaña activa");
+        assert_eq!(view.layout.spaces.len(), 1);
+        assert_eq!(view.layout.spaces[0].name, "espacio");
+        assert_eq!(view.layout.spaces[0].agent, AgentView::Blocked);
+    }
+
+    /// Sin servicio el modelo sale vacío, pero la vista existe igual.
+    ///
+    /// Un teléfono sin espacios es peor que uno con ellos, y mucho mejor que una
+    /// terminal que no abre.
+    #[test]
+    fn sin_servicio_el_modelo_sale_vacio() {
+        let plugin = MobilePlugin::new(Arc::new(Bridge::new()));
+        let view = plugin.view();
+        assert!(view.layout.spaces.is_empty());
+        assert_eq!(view.session, 0);
+    }
+
+    /// Una respuesta que no se entiende no rompe la vista.
+    #[test]
+    fn una_respuesta_ilegible_no_rompe_la_vista() {
+        struct StubRoto;
+
+        impl Service for StubRoto {
+            fn id(&self) -> &str {
+                LAYOUT_SERVICE_ID
+            }
+
+            fn name(&self) -> &str {
+                "roto"
+            }
+
+            fn actions(&self) -> Vec<&'static str> {
+                vec![LAYOUT_ACTION]
+            }
+
+            fn invoke(&self, _action: &str, _args: &[Arg]) -> Option<Result<Ret, ServiceError>> {
+                Some(Ok(Ret::Text("esto no es json".to_string())))
+            }
+        }
+
+        let services = Arc::new(Services::new());
+        services.publish(Arc::new(StubRoto));
+        let plugin = MobilePlugin::new(Arc::new(Bridge::new()));
+        plugin.attach_services(services);
+
+        assert!(plugin.view().layout.spaces.is_empty());
     }
 }

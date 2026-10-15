@@ -131,7 +131,7 @@ pub enum AgentView {
 }
 
 /// El modelo de espacios y pestañas, tal como lo ve el cliente.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Layout {
     /// Espacios abiertos, en su orden.
     pub spaces: Vec<SpaceView>,
