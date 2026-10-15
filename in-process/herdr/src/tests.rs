@@ -2392,14 +2392,238 @@ fn needs_animation_solo_con_marcador_animado_a_la_vista() {
     // Sin estado de agente, no hay marcador y no se anima.
     assert!(!needs());
     // Working anima el spinner.
-    plugin.state.write().unwrap().agents.insert(7, (AgentState::Working, true));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .agents
+        .insert(7, (AgentState::Working, true));
     assert!(needs());
     // Blocked anima el parpadeo.
-    plugin.state.write().unwrap().agents.insert(7, (AgentState::Blocked, false));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .agents
+        .insert(7, (AgentState::Blocked, false));
     assert!(needs());
     // Idle visto e Idle sin ver no animan (el segundo es estático).
-    plugin.state.write().unwrap().agents.insert(7, (AgentState::Idle, false));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .agents
+        .insert(7, (AgentState::Idle, false));
     assert!(!needs());
-    plugin.state.write().unwrap().agents.insert(7, (AgentState::Idle, true));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .agents
+        .insert(7, (AgentState::Idle, true));
     assert!(!needs());
+}
+
+/// Tres espacios mínimos para probar el reordenamiento por arrastre.
+fn three_spaces(plugin: &HerdrPlugin) {
+    let mut s = plugin.state.write().unwrap();
+    for n in 2..=3 {
+        s.spaces.push(HerdrSpace {
+            name: format!("space-{n}"),
+            branch: "main".to_string(),
+            custom_color: None,
+            tabs: vec![HerdrTab {
+                id: 100 + n,
+                title: "terminal".to_string(),
+                session_id: PENDING_SESSION,
+                app: None,
+                title_locked: false,
+                watching: None,
+            }],
+            active_tab_index: 0,
+        });
+    }
+}
+
+fn space_names(plugin: &HerdrPlugin) -> Vec<String> {
+    plugin
+        .state
+        .read()
+        .unwrap()
+        .spaces
+        .iter()
+        .map(|sp| sp.name.clone())
+        .collect()
+}
+
+#[test]
+fn arrastrar_sin_mover_es_un_clic_que_selecciona() {
+    let presence = empty_presence("drag-clic");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    // Clic en la tarjeta 2 sin mover: selecciona al soltar, sin reordenar.
+    plugin.state.write().unwrap().begin_space_drag(2, 100.0);
+    assert!(!plugin.state.write().unwrap().move_space_drag(103.0));
+    plugin.state.write().unwrap().end_space_drag();
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.active_space_index, 2);
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
+    assert!(s.space_drag.is_none());
+}
+
+#[test]
+fn arrastrar_hacia_abajo_intercambia_y_sigue_al_activo() {
+    let presence = empty_presence("drag-abajo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    assert_eq!(plugin.state.read().unwrap().active_space_index, 0);
+    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
+    // Cruzar medio paso (22.5 px) intercambia con el vecino de abajo.
+    assert!(plugin.state.write().unwrap().move_space_drag(123.0));
+    assert_eq!(space_names(&plugin), vec!["space-2", "space-1", "space-3"]);
+    // El activo sigue a la tarjeta arrastrada.
+    assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
+    // Seguir bajando intercambia con el siguiente.
+    assert!(plugin.state.write().unwrap().move_space_drag(168.0));
+    assert_eq!(space_names(&plugin), vec!["space-2", "space-3", "space-1"]);
+    plugin.state.write().unwrap().end_space_drag();
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.active_space_index, 2);
+    assert!(s.space_drag.is_none());
+}
+
+#[test]
+fn arrastrar_hacia_arriba_intercambia_y_respeta_limites() {
+    let presence = empty_presence("drag-arriba");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(2, 200.0);
+    assert!(plugin.state.write().unwrap().move_space_drag(177.0));
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-3", "space-2"]);
+    // Por encima del primero no hay nada: no se mueve más.
+    assert!(plugin.state.write().unwrap().move_space_drag(100.0));
+    assert_eq!(space_names(&plugin), vec!["space-3", "space-1", "space-2"]);
+    assert!(plugin.state.write().unwrap().move_space_drag(0.0));
+    assert_eq!(space_names(&plugin), vec!["space-3", "space-1", "space-2"]);
+    plugin.state.write().unwrap().end_space_drag();
+}
+
+#[test]
+fn arrastrar_pide_animacion_aunque_no_haya_agentes() {
+    let presence = empty_presence("drag-anima");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    let needs = || plugin.layout_hook().expect("layout").needs_animation();
+    assert!(!needs());
+    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
+    assert!(needs());
+    plugin.state.write().unwrap().end_space_drag();
+    assert!(!needs());
+}
+
+#[test]
+fn pestana_nueva_hereda_el_cwd_de_la_activa() {
+    let presence = empty_presence("hereda-cwd");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    // La pestaña inicial (sesión 0) está en /tmp/proyecto.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .session_cwds
+        .insert(0, PathBuf::from("/tmp/proyecto"));
+    let tab_id = plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+    // Va por la cola con cwd, no por la de shell por defecto.
+    {
+        let s = plugin.state.read().unwrap();
+        assert!(s.pending_shell_tabs.iter().all(|id| *id != tab_id));
+        assert!(s
+            .pending_cwd_shell_tabs
+            .iter()
+            .any(|(id, cwd)| *id == tab_id && cwd == &PathBuf::from("/tmp/proyecto")));
+    }
+    // El núcleo pide el spawn con ese cwd.
+    let cfg = plugin.take_spawn_session_request().expect("spawn con cwd");
+    assert_eq!(cfg.cwd.as_deref(), Some("/tmp/proyecto"));
+    // Al crear la sesión se enlaza a la pestaña como un shell normal.
+    plugin.on_session_created(41);
+    let s = plugin.state.read().unwrap();
+    let tab = s
+        .spaces
+        .iter()
+        .flat_map(|sp| sp.tabs.iter())
+        .find(|t| t.id == tab_id)
+        .expect("tab");
+    assert_eq!(tab.session_id, 41);
+}
+
+#[test]
+fn pestana_nueva_sin_cwd_usa_shell_por_defecto() {
+    let presence = empty_presence("sin-cwd");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let tab_id = plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+    {
+        let s = plugin.state.read().unwrap();
+        assert!(s.pending_shell_tabs.contains(&tab_id));
+        assert!(s.pending_cwd_shell_tabs.is_empty());
+    }
+    assert!(plugin.take_new_session_request());
+    plugin.on_session_created(42);
+    let s = plugin.state.read().unwrap();
+    let tab = s
+        .spaces
+        .iter()
+        .flat_map(|sp| sp.tabs.iter())
+        .find(|t| t.id == tab_id)
+        .expect("tab");
+    assert_eq!(tab.session_id, 42);
+}
+
+#[test]
+fn pestana_cerrada_olvida_su_peticion_con_cwd() {
+    let presence = empty_presence("olvida-cwd");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .session_cwds
+        .insert(0, PathBuf::from("/tmp/proyecto"));
+    let tab_id = plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+    plugin.state.write().unwrap().forget_tab(tab_id);
+    {
+        let s = plugin.state.read().unwrap();
+        assert!(s.pending_cwd_shell_tabs.is_empty());
+    }
+    // Sin visor ni colas, no hay spawn que pedir.
+    assert!(plugin.take_spawn_session_request().is_none());
+    // Una entrada huérfana se salta sin bloquear la cola.
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .pending_cwd_shell_tabs
+        .push_back((9999, PathBuf::from("/tmp/x")));
+    assert!(plugin.take_spawn_session_request().is_none());
+    assert!(plugin
+        .state
+        .read()
+        .unwrap()
+        .pending_cwd_shell_tabs
+        .is_empty());
 }

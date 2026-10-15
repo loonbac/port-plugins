@@ -31,8 +31,7 @@ const COLOR_IDLE_UNSEEN: Rgb = Rgb::new(0x39, 0xc5, 0xcf);
 /// periodo, tenue medio periodo.
 const BLOCKED_BLINK_PERIOD_MS: u64 = 1000;
 /// Cuadros del spinner braille para `Working`, a 80 ms por cuadro.
-const SPINNER_FRAMES: [&str; 10] =
-    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_FRAME_MS: u64 = 80;
 
 /// Cuadro del spinner según el reloj: avanza solo con cada render, sin timers
@@ -61,6 +60,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let accent = to_hsla(state.effective_accent());
     let state_sidebar_width = state.sidebar_width;
     let state_is_resizing = state.resize_anchor_x.is_some();
+    let drag_index = state.space_drag.map(|drag| drag.index);
     let space_agent_states: Vec<Option<(AgentState, bool)>> = spaces
         .iter()
         .map(|space| space.aggregated_agent_state(&state.agents))
@@ -76,6 +76,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         let is_active = i == active_space_idx;
         let dot_color = space.custom_color.map(to_hsla).unwrap_or(accent);
         let agent_state = space_agent_states[i];
+        let is_dragged = drag_index == Some(i);
 
         // Realce de tarjeta: Blocked o Idle sin ver tiñen borde y fondo de la tarjeta con su color;
         // la tarjeta activa conserva el tinte de acento cuando no hay aviso.
@@ -87,14 +88,24 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             _ if is_active => (accent.opacity(0.20), accent.opacity(0.55)),
             _ => (term_bg.opacity(0.0), term_bg.opacity(0.0)),
         };
+        // Tarjeta arrastrada: levantada y pulsante para seguirla con la vista
+        // mientras se reordena en vivo.
+        let (card_bg, card_border) = if is_dragged {
+            let lift = if blink_on(agents::now_ms(), 600) {
+                0.34
+            } else {
+                0.20
+            };
+            (accent.opacity(lift), accent)
+        } else {
+            (card_bg, card_border)
+        };
 
         // Animación por reloj de render (ver `spinner_frame`/`blink_on`).
         let now_ms = agents::now_ms();
         // Marcador a la derecha de la fila del nombre: glifo + texto corto según estado
         let marker = match agent_state {
-            Some((AgentState::Working, _)) => {
-                Some((spinner_frame(now_ms), "working", accent))
-            }
+            Some((AgentState::Working, _)) => Some((spinner_frame(now_ms), "working", accent)),
             Some((AgentState::Blocked, _)) => {
                 let color = if blink_on(now_ms, BLOCKED_BLINK_PERIOD_MS) {
                     warn_hsla
@@ -120,14 +131,17 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .bg(card_bg)
             .border_1()
             .border_color(card_border)
-            .on_mouse_down(
-                MouseButton::Left,
-                move |_event, window: &mut Window, _cx| {
+            .on_mouse_down(MouseButton::Left, move |event, window: &mut Window, _cx| {
+                let y: f32 = event.position.y.into();
+                {
                     let mut s = state_for_click.write().unwrap();
-                    s.select_space_with_attention(i);
-                    window.refresh();
-                },
-            )
+                    // No selecciona todavía: si el puntero no se mueve es un
+                    // clic y `end_space_drag` seleccionará al soltar; si se
+                    // mueve, empieza el reordenamiento en vivo.
+                    s.begin_space_drag(i, y);
+                }
+                window.refresh();
+            })
             .child(
                 // El ancho lo decide la barra, nunca el nombre: `flex_1` toma
                 // el espacio disponible, `min_w_0` deja encogerse por debajo
@@ -523,6 +537,32 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             })
             .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
                 state_for_end.write().unwrap().resize_anchor_x = None;
+                window.refresh();
+            });
+        shell = shell.child(overlay);
+    }
+
+    // Mientras se arrastra una tarjeta, una capa invisible cubre la ventana
+    // para seguir al puntero hasta el `mouse_up`, con el mismo patrón del
+    // asidero de ancho.
+    if drag_index.is_some() {
+        let state_for_move = Arc::clone(&plugin.state);
+        let state_for_end = Arc::clone(&plugin.state);
+        let overlay = div()
+            .absolute()
+            .left(px(0.0))
+            .top(px(0.0))
+            .h_full()
+            .w(px(6000.0))
+            .on_mouse_move(move |event, window, _cx| {
+                let y: f32 = event.position.y.into();
+                let changed = state_for_move.write().unwrap().move_space_drag(y);
+                if changed {
+                    window.refresh();
+                }
+            })
+            .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
+                state_for_end.write().unwrap().end_space_drag();
                 window.refresh();
             });
         shell = shell.child(overlay);

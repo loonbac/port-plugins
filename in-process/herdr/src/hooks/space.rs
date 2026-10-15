@@ -86,27 +86,41 @@ impl SpaceHook for HerdrPlugin {
                 // a una pestaña que ya se cerró, así que la petición se
                 // descarta entera. `pending_viewer_tab` se conserva hasta que
                 // `on_session_created` confirme la sesión.
-                let Some(tab_id) = s.pending_viewer_tab else {
+                if let Some(tab_id) = s.pending_viewer_tab {
+                    if s.tab_by_id_mut(tab_id).is_none() {
+                        s.pending_watch = None;
+                        s.pending_viewer_tab = None;
+                    } else if let Some(watch) = s.pending_watch.clone() {
+                        // La petición se conserva hasta que el núcleo cree la sesión;
+                        // su etiqueta sobrevive porque la pestaña aún no existe cuando
+                        // el núcleo la pide.
+                        s.pending_viewer_title = Some(watch.agent_label.clone());
+                        s.in_flight = Some(InFlight::Viewer(tab_id));
+                        return Some(viewer::watch_command(
+                            &watch.presence_dir,
+                            &watch.session_hash,
+                            &watch.incarnation,
+                            &watch.agent_label,
+                        ));
+                    }
+                    // Visor todavía pendiente sin comando reconstruible: conserva
+                    // su turno y deja pasar al shell con cwd de este render.
+                } else {
                     s.pending_watch = None;
-                    return None;
-                };
-                if s.tab_by_id_mut(tab_id).is_none() {
-                    s.pending_watch = None;
-                    s.pending_viewer_tab = None;
-                    return None;
                 }
-                // La petición se conserva hasta que el núcleo cree la sesión;
-                // su etiqueta sobrevive porque la pestaña aún no existe cuando
-                // el núcleo la pide.
-                let watch = s.pending_watch.clone()?;
-                s.pending_viewer_title = Some(watch.agent_label.clone());
-                s.in_flight = Some(InFlight::Viewer(tab_id));
-                Some(viewer::watch_command(
-                    &watch.presence_dir,
-                    &watch.session_hash,
-                    &watch.incarnation,
-                    &watch.agent_label,
-                ))
+                // Shell con carpeta heredada para una pestaña nueva: mismo
+                // `InFlight::Shell` que el shell por defecto, así que
+                // `on_session_created` lo enlaza igual; solo cambia el `cwd`.
+                while let Some((tab_id, cwd)) = s.pending_cwd_shell_tabs.pop_front() {
+                    if s.tab_by_id_mut(tab_id).is_some() {
+                        s.in_flight = Some(InFlight::Shell(tab_id));
+                        return Some(PtyConfig {
+                            cwd: Some(cwd.to_string_lossy().into_owned()),
+                            ..PtyConfig::default()
+                        });
+                    }
+                }
+                None
             }
         }
     }

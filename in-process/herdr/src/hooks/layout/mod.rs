@@ -50,6 +50,11 @@ impl LayoutHook for HerdrPlugin {
     /// esos estados, la ventana vuelve a repintar solo a demanda.
     fn needs_animation(&self) -> bool {
         let s = self.state.read().unwrap();
+        // Arrastrando una tarjeta, los cuadros deben seguir fluyendo para el
+        // reordenamiento en vivo y el resaltado pulsante.
+        if s.space_drag.is_some() {
+            return true;
+        }
         if !self.sidebar_shown(&s) {
             return false;
         }

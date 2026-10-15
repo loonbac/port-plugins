@@ -146,6 +146,9 @@ Comportamiento destacado:
   en un espacio con atención, la terminal no solo cambia al espacio sino que
   selecciona directamente la pestaña que la requiere (primero la que espera
   respuesta y luego la que terminó).
+- Las tarjetas de espacio se arrastran con el clic para reordenarlas (al
+  soltar sin mover, selecciona como antes). Las pestañas nuevas heredan la
+  carpeta de la pestaña activa de su espacio.
 
 ### `close-guard`
 

@@ -92,6 +92,29 @@ pub struct HerdrSpace {
     pub active_tab_index: usize,
 }
 
+/// Umbral en píxeles para distinguir un clic de un arrastre al reordenar espacios.
+///
+/// Por debajo no pasa nada hasta el `mouse_up`: así un clic normal sigue
+/// seleccionando al soltar, igual que antes.
+pub(crate) const SPACE_DRAG_THRESHOLD: f32 = 6.0;
+/// Paso vertical estimado entre tarjetas de espacio (altura + separación), en píxeles.
+///
+/// Es una estimación porque el plugin no mide el layout (GPUI no lo expone a
+/// los plugins): basta porque el ancla se recentra en cada intercambio y el
+/// error solo cambia ligeramente la sensibilidad del arrastre.
+pub(crate) const SPACE_CARD_PITCH: f32 = 45.0;
+
+/// Arrastre de reordenamiento de espacios en curso, si lo hay.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SpaceDrag {
+    /// Posición actual de la tarjeta arrastrada dentro de `spaces`.
+    pub index: usize,
+    /// Coordenada Y donde empezó el tramo actual (se recentra en cada intercambio).
+    pub anchor_y: f32,
+    /// `true` en cuanto el puntero superó el umbral: ya no es un clic.
+    pub moved: bool,
+}
+
 impl HerdrSpace {
     /// Corrige `active_tab_index` después de quitar pestañas del espacio.
     pub(crate) fn clamp_active_tab(&mut self) {
@@ -199,6 +222,11 @@ pub struct HerdrState {
     /// Es una cola y no un booleano: el núcleo crea una sesión por render, así
     /// que dos `Ctrl+Shift+T` en el mismo frame no pueden perder la segunda.
     pub(crate) pending_shell_tabs: VecDeque<usize>,
+    /// Pestañas nuevas que nacieron con carpeta heredada: `(tab_id, cwd)`.
+    ///
+    /// Viajan por `take_spawn_session_request` (shell con `cwd`), no por la
+    /// petición booleana, porque el núcleo solo acepta el cwd dentro del `PtyConfig`.
+    pub(crate) pending_cwd_shell_tabs: VecDeque<(usize, PathBuf)>,
     pub close_session_requested: Option<usize>,
     /// Visor pedido por un clic y todavía no consumido por el núcleo.
     pub(crate) pending_watch: Option<PendingWatch>,
@@ -241,6 +269,9 @@ pub struct HerdrState {
     pub(crate) git_branch_cache: HashMap<PathBuf, (String, u64)>,
     /// Estado de agente por sesión con su marca de visto: `(AgentState, seen)`.
     pub(crate) agents: HashMap<usize, (AgentState, bool)>,
+    /// Arrastre de reordenamiento en curso. Mientras está presente, la sidebar
+    /// muestra una capa que sigue al puntero hasta el `mouse_up`.
+    pub(crate) space_drag: Option<SpaceDrag>,
 }
 
 /// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
@@ -352,6 +383,7 @@ impl HerdrState {
     /// con una pestaña viva y le pisaría el terminal.
     pub(crate) fn forget_tab(&mut self, tab_id: usize) {
         self.pending_shell_tabs.retain(|id| *id != tab_id);
+        self.pending_cwd_shell_tabs.retain(|(id, _)| *id != tab_id);
         if self.in_flight.is_some_and(|f| f.tab_id() == tab_id) {
             self.in_flight = None;
         }
@@ -439,6 +471,22 @@ impl HerdrState {
     pub(crate) fn create_pending_tab_in_active_space(&mut self) -> Option<usize> {
         let tab_id = self.next_tab_id;
         self.next_tab_id += 1;
+        // La carpeta se hereda de la pestaña activa ANTES de añadir la nueva
+        // (que pasa a ser la activa). Si la activa muestra el visor, se usa la
+        // sesión original guardada, no la del visor. Sin cwd conocido, shell
+        // por defecto como antes.
+        let inherited_cwd = self
+            .spaces
+            .get(self.active_space_index)
+            .and_then(|space| space.tabs.get(space.active_tab_index))
+            .and_then(|tab| {
+                let real = tab
+                    .watching
+                    .as_ref()
+                    .and_then(|watched| watched.session_id)
+                    .or((tab.session_id != PENDING_SESSION).then_some(tab.session_id))?;
+                self.session_cwds.get(&real).cloned()
+            });
         let space = self.spaces.get_mut(self.active_space_index)?;
         let title = format!("term {}", space.tabs.len() + 1);
         space.tabs.push(HerdrTab {
@@ -450,7 +498,10 @@ impl HerdrState {
             watching: None,
         });
         space.active_tab_index = space.tabs.len() - 1;
-        self.pending_shell_tabs.push_back(tab_id);
+        match inherited_cwd {
+            Some(cwd) => self.pending_cwd_shell_tabs.push_back((tab_id, cwd)),
+            None => self.pending_shell_tabs.push_back(tab_id),
+        }
         Some(tab_id)
     }
 
@@ -468,6 +519,67 @@ impl HerdrState {
             if let Some(space) = self.spaces.get_mut(space_index) {
                 space.active_tab_index = tab_idx;
             }
+        }
+    }
+}
+
+impl HerdrState {
+    /// Inicia el posible arrastre de la tarjeta `index` en la coordenada Y dada.
+    ///
+    /// Todavía no selecciona ni mueve nada: si el puntero no supera el umbral,
+    /// `end_space_drag` lo tratará como un clic normal.
+    pub(crate) fn begin_space_drag(&mut self, index: usize, y: f32) {
+        if index < self.spaces.len() {
+            self.space_drag = Some(SpaceDrag {
+                index,
+                anchor_y: y,
+                moved: false,
+            });
+        }
+    }
+
+    /// Avanza el arrastre a la coordenada Y indicada, intercambiando la tarjeta
+    /// con sus vecinas al cruzar medio paso y siguiendo al espacio activo.
+    ///
+    /// Devuelve `true` si algo cambió (inicio del arrastre o algún intercambio)
+    /// y hay que repintar.
+    pub(crate) fn move_space_drag(&mut self, y: f32) -> bool {
+        let Some(drag) = self.space_drag.as_mut() else {
+            return false;
+        };
+        if !drag.moved && (y - drag.anchor_y).abs() < SPACE_DRAG_THRESHOLD {
+            return false;
+        }
+        drag.moved = true;
+        while y - drag.anchor_y > SPACE_CARD_PITCH / 2.0 && drag.index + 1 < self.spaces.len() {
+            self.spaces.swap(drag.index, drag.index + 1);
+            if self.active_space_index == drag.index {
+                self.active_space_index = drag.index + 1;
+            } else if self.active_space_index == drag.index + 1 {
+                self.active_space_index = drag.index;
+            }
+            drag.index += 1;
+            drag.anchor_y += SPACE_CARD_PITCH;
+        }
+        while y - drag.anchor_y < -SPACE_CARD_PITCH / 2.0 && drag.index > 0 {
+            self.spaces.swap(drag.index, drag.index - 1);
+            if self.active_space_index == drag.index {
+                self.active_space_index = drag.index - 1;
+            } else if self.active_space_index == drag.index - 1 {
+                self.active_space_index = drag.index;
+            }
+            drag.index -= 1;
+            drag.anchor_y -= SPACE_CARD_PITCH;
+        }
+        true
+    }
+
+    /// Termina el arrastre: selecciona la tarjeta arrastrada (haya sido clic o
+    /// soltado tras mover) y limpia el estado. Conserva el salto a la pestaña
+    /// con atención del clic normal.
+    pub(crate) fn end_space_drag(&mut self) {
+        if let Some(drag) = self.space_drag.take() {
+            self.select_space_with_attention(drag.index);
         }
     }
 }
@@ -496,6 +608,7 @@ impl Default for HerdrState {
             opacity: 0.0,
             accent_mode: "auto".to_string(),
             pending_shell_tabs: VecDeque::new(),
+            pending_cwd_shell_tabs: VecDeque::new(),
             close_session_requested: None,
             pending_watch: None,
             pending_viewer_tab: None,
@@ -513,6 +626,7 @@ impl Default for HerdrState {
             session_cwds: HashMap::new(),
             git_branch_cache: HashMap::new(),
             agents: HashMap::new(),
+            space_drag: None,
         }
     }
 }
