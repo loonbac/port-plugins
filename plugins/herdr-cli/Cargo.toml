@@ -1,0 +1,13 @@
+[package]
+name = "port-herdr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Reemplazo liviano de la CLI de herdr para interceptar llamadas de metadatos"
+
+[[bin]]
+name = "port-herdr"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
