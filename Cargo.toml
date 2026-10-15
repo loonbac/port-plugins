@@ -3,10 +3,15 @@ resolver = "2"
 # `plugins/*` son los instalables externos (binario propio, solo el SDK).
 # `in-process/*` son los que necesitan recompilar PORT porque usan features en
 # proceso (GPUI, hooks en caliente, protocolo de cierre).
+#
+# `herdr-cli` queda excluido a propósito: no comparte ninguna dependencia con el
+# resto y tiene que poder construirse solo, desde su propia fuente, porque el
+# paquete de PORT lo instala junto al binario de la terminal.
 members = [
     "plugins/*",
     "in-process/*",
 ]
+exclude = ["plugins/herdr-cli"]
 
 [workspace.package]
 edition = "2021"

@@ -1,0 +1,1 @@
+/home/loonbac/Proyectos/port-plugins/plugins/herdr-cli/target/debug/port-herdr: /home/loonbac/Proyectos/port-plugins/plugins/herdr-cli/src/lib.rs /home/loonbac/Proyectos/port-plugins/plugins/herdr-cli/src/main.rs
