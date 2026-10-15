@@ -2362,3 +2362,44 @@ fn clic_en_espacio_con_atencion_selecciona_pestana_que_la_requiere() {
         assert_eq!(s.spaces[0].active_tab_index, 0);
     }
 }
+
+#[test]
+fn needs_animation_solo_con_marcador_animado_a_la_vista() {
+    use port_plugin_api::AgentState;
+    let presence = empty_presence("animacion");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let needs = || plugin.layout_hook().expect("layout").needs_animation();
+    // Terminal limpia: sin sidebar, sin animación.
+    assert!(!needs());
+    // Un espacio con una pestaña atada a una sesión real.
+    {
+        let mut s = plugin.state.write().unwrap();
+        s.spaces.push(HerdrSpace {
+            name: "space-2".to_string(),
+            branch: "main".to_string(),
+            custom_color: None,
+            tabs: vec![HerdrTab {
+                id: 99,
+                title: "pi".to_string(),
+                session_id: 7,
+                app: None,
+                title_locked: false,
+                watching: None,
+            }],
+            active_tab_index: 0,
+        });
+    }
+    // Sin estado de agente, no hay marcador y no se anima.
+    assert!(!needs());
+    // Working anima el spinner.
+    plugin.state.write().unwrap().agents.insert(7, (AgentState::Working, true));
+    assert!(needs());
+    // Blocked anima el parpadeo.
+    plugin.state.write().unwrap().agents.insert(7, (AgentState::Blocked, false));
+    assert!(needs());
+    // Idle visto e Idle sin ver no animan (el segundo es estático).
+    plugin.state.write().unwrap().agents.insert(7, (AgentState::Idle, false));
+    assert!(!needs());
+    plugin.state.write().unwrap().agents.insert(7, (AgentState::Idle, true));
+    assert!(!needs());
+}

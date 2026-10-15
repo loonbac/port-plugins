@@ -5,7 +5,7 @@
 
 use gpui::AnyElement;
 
-use port_plugin_api::LayoutHook;
+use port_plugin_api::{AgentState, LayoutHook};
 
 use crate::HerdrPlugin;
 
@@ -43,5 +43,21 @@ impl LayoutHook for HerdrPlugin {
 
     fn top_bar(&self) -> Option<AnyElement> {
         topbar::top_bar(self)
+    }
+
+    /// Pide cuadros continuos solo mientras haya un marcador animado a la
+    /// vista: `Working` (spinner) o `Blocked` (parpadeo). Sin sidebar o sin
+    /// esos estados, la ventana vuelve a repintar solo a demanda.
+    fn needs_animation(&self) -> bool {
+        let s = self.state.read().unwrap();
+        if !self.sidebar_shown(&s) {
+            return false;
+        }
+        s.spaces.iter().any(|space| {
+            matches!(
+                space.aggregated_agent_state(&s.agents),
+                Some((AgentState::Working, _)) | Some((AgentState::Blocked, _))
+            )
+        })
     }
 }
