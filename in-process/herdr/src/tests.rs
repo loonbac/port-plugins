@@ -2749,3 +2749,35 @@ fn pestana_cerrada_olvida_su_peticion_con_cwd() {
         .pending_cwd_shell_tabs
         .is_empty());
 }
+
+/// La sesión creada enlaza el panel que el plugin anunció al lanzarla.
+///
+/// Es lo que permite resolver después el `pane_id` que reporta la aplicación
+/// que corre dentro: sin el enlace, todo informe sería de un panel desconocido.
+#[test]
+fn la_sesion_nueva_enlaza_el_panel_que_se_anuncio() {
+    let presence = empty_presence("enlaza-panel");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let tab_id = plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+
+    assert!(plugin.take_new_session_request());
+    let panel = plugin
+        .state
+        .read()
+        .unwrap()
+        .pending_panel
+        .clone()
+        .expect("panel acuñado");
+    assert_eq!(panel, crate::state::panel_id(tab_id));
+
+    plugin.on_session_created(41);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.panel_reports.session(&panel), Some(41));
+    assert!(s.pending_panel.is_none(), "el panel pendiente se consume");
+}

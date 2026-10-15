@@ -23,7 +23,9 @@ pub(crate) mod anim;
 mod color;
 mod hooks;
 mod identity;
+mod panel_socket;
 pub(crate) mod presence;
+mod report;
 mod state;
 pub(crate) mod viewer;
 mod watch;
@@ -62,6 +64,36 @@ pub struct HerdrPlugin {
     agents: SharedAgents,
 }
 
+/// Variable de entorno que declara dónde escuchar informes de panel.
+///
+/// Sin ella no se abre ningún socket: publicar esa superficie es una decisión
+/// de quien lanza el plugin, no un efecto de cargarlo.
+pub(crate) const PANEL_SOCKET_ENV: &str = "PORT_HERDR_SOCKET";
+
+/// Arranca el socket de paneles si el entorno declara dónde escuchar.
+fn spawn_panel_socket(state: &Arc<RwLock<HerdrState>>) {
+    let Some(path) = panel_socket_path() else {
+        return;
+    };
+    if let Err(error) = panel_socket::spawn(Arc::clone(state), &path) {
+        // Un socket que no se puede abrir no puede impedir que la terminal
+        // arranque: se avisa y se sigue sin esa superficie.
+        eprintln!(
+            "port-plugin-herdr: no pude escuchar informes de panel en {}: {error}",
+            path.display()
+        );
+    }
+}
+
+/// Ruta del socket de paneles declarada por el entorno, si la hay.
+fn panel_socket_path() -> Option<PathBuf> {
+    let raw = std::env::var_os(PANEL_SOCKET_ENV)?;
+    if raw.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(raw))
+}
+
 impl HerdrPlugin {
     /// Crea una nueva instancia del plugin Herdr con valores por defecto.
     pub fn new() -> Self {
@@ -85,6 +117,7 @@ impl HerdrPlugin {
         };
         let state = Arc::new(RwLock::new(initial_state));
         agents::spawn_background_refresher(&agents, &state);
+        spawn_panel_socket(&state);
         Self { state, agents }
     }
 

@@ -3,7 +3,7 @@
 //! Única responsabilidad: describir los espacios, sus pestañas y el visor de un
 //! subagente, junto con las operaciones que mantienen ese estado coherente.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use port_plugin_api::AgentState;
@@ -12,6 +12,7 @@ use port_term_core::pty::RunningApp;
 
 use crate::anim::Spring;
 use crate::color::system_accent_color;
+use crate::report::{ReportError, ReportRequest};
 
 /// Estado original de una pestaña que el visor de un subagente está ocupando.
 ///
@@ -236,6 +237,154 @@ impl InFlight {
     }
 }
 
+/// Tope de tokens vigentes por panel, copiado del contrato de herdr (C11).
+pub(crate) const MAX_PANEL_TOKENS: usize = 32;
+
+/// Token declarado por un panel, con su vencimiento.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PanelToken {
+    value: String,
+    /// Momento en que deja de valer; `None` si no caduca.
+    deadline_ms: Option<u64>,
+}
+
+/// Libro de informes de panel.
+///
+/// Un panel es una sesión de PORT vista por la aplicación que corre dentro; su
+/// identidad la acuña el plugin al lanzar el shell y el enlace con la sesión se
+/// cierra cuando el núcleo la crea.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PanelReports {
+    /// Último `seq` aceptado por par (panel, fuente).
+    seq: BTreeMap<(String, String), u64>,
+    /// Tokens vigentes por panel.
+    tokens: BTreeMap<String, BTreeMap<String, PanelToken>>,
+    /// Panel -> sesión, enlazado cuando el núcleo crea la sesión.
+    panes: BTreeMap<String, usize>,
+}
+
+/// Qué pasó al aplicar un informe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PanelOutcome {
+    /// El informe se aplicó.
+    Applied,
+    /// Llegó fuera de orden: se descarta en silencio, como hace herdr.
+    Stale,
+}
+
+impl PanelReports {
+    /// Enlaza un panel con la sesión que el núcleo acaba de crear.
+    pub(crate) fn bind(&mut self, pane_id: &str, session_id: usize) {
+        self.panes.insert(pane_id.to_string(), session_id);
+    }
+
+    /// Sesión de un panel, si está enlazado.
+    pub(crate) fn session(&self, pane_id: &str) -> Option<usize> {
+        self.panes.get(pane_id).copied()
+    }
+
+    /// Tokens vigentes de un panel.
+    ///
+    /// Sólo lo usan las pruebas: en producción los tokens se guardan para
+    /// vigilar vencimientos y topes, y el estado del agente se lee del mapa de
+    /// agentes, no de acá.
+    #[cfg(test)]
+    pub(crate) fn value(&self, pane_id: &str, key: &str) -> Option<&str> {
+        self.tokens
+            .get(pane_id)
+            .and_then(|tokens| tokens.get(key))
+            .map(|token| token.value.as_str())
+    }
+
+    /// Descarta los tokens vencidos del panel.
+    fn purge_expired(&mut self, pane_id: &str, now_ms: u64) {
+        let Some(tokens) = self.tokens.get_mut(pane_id) else {
+            return;
+        };
+        tokens.retain(|_, token| match token.deadline_ms {
+            Some(deadline) => deadline > now_ms,
+            None => true,
+        });
+        if tokens.is_empty() {
+            self.tokens.remove(pane_id);
+        }
+    }
+
+    /// `true` si el `seq` es nuevo; lo registra cuando lo es.
+    ///
+    /// Sin `seq` el informe siempre entra, igual que en herdr: el orden sólo se
+    /// vigila para quien lo declara.
+    fn accept_seq(&mut self, pane_id: &str, source: &str, seq: Option<u64>) -> bool {
+        let Some(seq) = seq else {
+            return true;
+        };
+        let key = (pane_id.to_string(), source.to_string());
+        if let Some(last) = self.seq.get(&key) {
+            if seq <= *last {
+                return false;
+            }
+        }
+        self.seq.insert(key, seq);
+        true
+    }
+
+    /// Aplica los tokens de una petición ya validada.
+    fn apply_tokens(&mut self, request: &ReportRequest, now_ms: u64) -> Result<(), ReportError> {
+        self.purge_expired(&request.pane_id, now_ms);
+        let existing: Vec<String> = self
+            .tokens
+            .get(&request.pane_id)
+            .map(|tokens| tokens.keys().cloned().collect())
+            .unwrap_or_default();
+        let adding = request
+            .tokens
+            .iter()
+            .filter(|(key, value)| !value.is_empty() && !existing.contains(key))
+            .count();
+        if existing.len() + adding > MAX_PANEL_TOKENS {
+            return Err(ReportError::TokenLimit);
+        }
+
+        let deadline_ms = request.ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        let tokens = self.tokens.entry(request.pane_id.clone()).or_default();
+        for (key, value) in &request.tokens {
+            if value.is_empty() {
+                tokens.remove(key);
+            } else {
+                tokens.insert(
+                    key.clone(),
+                    PanelToken {
+                        value: value.clone(),
+                        deadline_ms,
+                    },
+                );
+            }
+        }
+        if tokens.is_empty() {
+            self.tokens.remove(&request.pane_id);
+        }
+        Ok(())
+    }
+}
+
+/// Identidad de panel que el plugin anuncia al lanzar una sesión.
+///
+/// PORT no copia el formato de herdr (`w1:p2`): el id sólo tiene que ser único
+/// y estable mientras viva la sesión, y el de la pestaña ya lo es. Quien lo
+/// recibe lo devuelve tal cual, así que la forma no importa.
+pub(crate) fn panel_id(tab_id: usize) -> String {
+    format!("p{tab_id}")
+}
+
+/// Marca de visto que corresponde a un estado reportado por un panel.
+///
+/// `Working` no le pide nada al usuario, así que no reclama atención; `Blocked`
+/// e `Idle` sí, y entran sin ver para que la barra los destaque. `Unknown` no
+/// pinta marcador, así que su marca da igual.
+fn report_seen(state: AgentState) -> bool {
+    matches!(state, AgentState::Working | AgentState::Unknown)
+}
+
 /// Estado interno del plugin Herdr.
 #[derive(Debug, Clone)]
 pub struct HerdrState {
@@ -299,6 +448,10 @@ pub struct HerdrState {
     pub(crate) git_branch_cache: HashMap<PathBuf, (String, u64)>,
     /// Estado de agente por sesión con su marca de visto: `(AgentState, seen)`.
     pub(crate) agents: HashMap<usize, (AgentState, bool)>,
+    /// Libro de informes de panel: la superficie de herdr que PORT intercepta.
+    pub(crate) panel_reports: PanelReports,
+    /// Panel acuñado para el lanzamiento en vuelo, a la espera de su sesión.
+    pub(crate) pending_panel: Option<String>,
     /// Arrastre de reordenamiento en curso. Mientras está presente, la sidebar
     /// muestra una capa que sigue al puntero hasta el `mouse_up`.
     pub(crate) space_drag: Option<SpaceDrag>,
@@ -706,6 +859,37 @@ impl HerdrState {
                 .iter()
                 .any(|spring| spring.value() != 0.0)
     }
+
+    /// Aplica un informe de panel ya validado.
+    ///
+    /// Un panel desconocido es un error del contrato, no un detalle: quien
+    /// escribe se identifica con un panel que el plugin anunció al lanzarlo.
+    pub(crate) fn apply_panel_report(
+        &mut self,
+        request: &ReportRequest,
+        now_ms: u64,
+    ) -> Result<PanelOutcome, ReportError> {
+        let session = self
+            .panel_reports
+            .session(&request.pane_id)
+            .ok_or_else(|| ReportError::PaneNotFound(request.pane_id.clone()))?;
+
+        // Fuera de orden: se descarta sin tocar los tokens ni el estado.
+        if !self
+            .panel_reports
+            .accept_seq(&request.pane_id, &request.source, request.seq)
+        {
+            return Ok(PanelOutcome::Stale);
+        }
+
+        self.panel_reports.apply_tokens(request, now_ms)?;
+
+        if let Some(state) = request.agent_state() {
+            self.agents.insert(session, (state, report_seen(state)));
+        }
+
+        Ok(PanelOutcome::Applied)
+    }
 }
 
 impl Default for HerdrState {
@@ -752,6 +936,8 @@ impl Default for HerdrState {
             agents: HashMap::new(),
             space_drag: None,
             space_motion: SpaceMotion::default(),
+            panel_reports: PanelReports::default(),
+            pending_panel: None,
         }
     }
 }
@@ -775,4 +961,110 @@ pub(crate) fn aggregate_agent_state<'a>(
     states
         .max_by_key(|(state, seen)| agent_state_priority(*state, *seen))
         .copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::report::STATE_TOKEN;
+
+    /// Petición ya validada, como la entregaría el protocolo.
+    fn request(
+        pane: &str,
+        tokens: &[(&str, &str)],
+        seq: Option<u64>,
+        ttl_ms: Option<u64>,
+    ) -> ReportRequest {
+        ReportRequest {
+            id: "cli:request".to_string(),
+            pane_id: pane.to_string(),
+            source: "gentle:activity".to_string(),
+            tokens: tokens
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            seq,
+            ttl_ms,
+        }
+    }
+
+    /// Un estado reportado llega al mapa de agentes con la marca correcta.
+    ///
+    /// `Working` no le pide nada al usuario; `Blocked` e `Idle` sí, y sin ver
+    /// para que la barra los destaque.
+    #[test]
+    fn el_estado_reportado_llega_con_su_marca_de_visto() {
+        let mut state = HerdrState::default();
+        state.panel_reports.bind("w1:p1", 7);
+
+        for (reported, expected) in [
+            ("working", (AgentState::Working, true)),
+            ("blocked", (AgentState::Blocked, false)),
+            ("idle", (AgentState::Idle, false)),
+        ] {
+            let request = request("w1:p1", &[(STATE_TOKEN, reported)], None, None);
+            assert_eq!(
+                state.apply_panel_report(&request, 1_000),
+                Ok(PanelOutcome::Applied)
+            );
+            assert_eq!(state.agents.get(&7), Some(&expected), "estado {reported}");
+        }
+    }
+
+    /// Un token con vida deja de valer cuando vence.
+    #[test]
+    fn los_tokens_vencen() {
+        let mut state = HerdrState::default();
+        state.panel_reports.bind("w1:p1", 1);
+
+        let con_vida = request("w1:p1", &[("summary", "leyendo")], None, Some(100));
+        assert_eq!(
+            state.apply_panel_report(&con_vida, 1_000),
+            Ok(PanelOutcome::Applied)
+        );
+        assert_eq!(
+            state.panel_reports.value("w1:p1", "summary"),
+            Some("leyendo")
+        );
+
+        // Antes del vencimiento sigue vigente.
+        let otro = request("w1:p1", &[("otro", "x")], None, None);
+        assert!(state.apply_panel_report(&otro, 1_099).is_ok());
+        assert_eq!(
+            state.panel_reports.value("w1:p1", "summary"),
+            Some("leyendo")
+        );
+
+        // Pasado el vencimiento se descarta.
+        assert!(state.apply_panel_report(&otro, 1_101).is_ok());
+        assert_eq!(state.panel_reports.value("w1:p1", "summary"), None);
+        assert_eq!(state.panel_reports.value("w1:p1", "otro"), Some("x"));
+    }
+
+    /// No se acumulan más tokens de los que el contrato permite por panel.
+    #[test]
+    fn el_tope_de_tokens_por_panel_se_respeta() {
+        let mut state = HerdrState::default();
+        state.panel_reports.bind("w1:p1", 1);
+
+        // Dos peticiones llenan el panel hasta el tope.
+        for start in [0, 16] {
+            let claves: Vec<String> = (start..start + 16).map(|n| format!("k{n}")).collect();
+            let tokens: Vec<(&str, &str)> = claves.iter().map(|key| (key.as_str(), "v")).collect();
+            let request = request("w1:p1", &tokens, None, None);
+            assert!(state.apply_panel_report(&request, 1_000).is_ok());
+        }
+
+        // El token número 33 no entra.
+        let extra = request("w1:p1", &[("k99", "v")], None, None);
+        assert_eq!(
+            state.apply_panel_report(&extra, 1_000),
+            Err(ReportError::TokenLimit)
+        );
+
+        // Reescribir uno que ya existe no cuenta como nuevo.
+        let repetido = request("w1:p1", &[("k0", "otro")], None, None);
+        assert!(state.apply_panel_report(&repetido, 1_000).is_ok());
+        assert_eq!(state.panel_reports.value("w1:p1", "k0"), Some("otro"));
+    }
 }

@@ -42,6 +42,9 @@ impl SpaceHook for HerdrPlugin {
                 // por un id muerto terminaría pisando el terminal de una viva.
                 while let Some(tab_id) = s.pending_shell_tabs.pop_front() {
                     if s.tab_by_id_mut(tab_id).is_some() {
+                        // La identidad de panel se acuña acá, antes de lanzar: el
+                        // entorno se fija en el spawn y la sesión todavía no existe.
+                        s.pending_panel = Some(crate::state::panel_id(tab_id));
                         s.in_flight = Some(InFlight::Shell(tab_id));
                         return true;
                     }
@@ -95,6 +98,9 @@ impl SpaceHook for HerdrPlugin {
                         // su etiqueta sobrevive porque la pestaña aún no existe cuando
                         // el núcleo la pide.
                         s.pending_viewer_title = Some(watch.agent_label.clone());
+                        // Un visor no es un panel: la aplicación que reporta no
+                        // corre ahí, así que no hereda identidad de panel.
+                        s.pending_panel = None;
                         s.in_flight = Some(InFlight::Viewer(tab_id));
                         return Some(viewer::watch_command(
                             &watch.presence_dir,
@@ -113,6 +119,7 @@ impl SpaceHook for HerdrPlugin {
                 // `on_session_created` lo enlaza igual; solo cambia el `cwd`.
                 while let Some((tab_id, cwd)) = s.pending_cwd_shell_tabs.pop_front() {
                     if s.tab_by_id_mut(tab_id).is_some() {
+                        s.pending_panel = Some(crate::state::panel_id(tab_id));
                         s.in_flight = Some(InFlight::Shell(tab_id));
                         return Some(PtyConfig {
                             cwd: Some(cwd.to_string_lossy().into_owned()),
@@ -133,6 +140,11 @@ impl SpaceHook for HerdrPlugin {
         let Some(target) = s.in_flight.take() else {
             return;
         };
+        // El panel anunciado al lanzar esta sesión queda enlazado: es lo que
+        // permite resolver después el `pane_id` que reporta la aplicación.
+        if let Some(pane_id) = s.pending_panel.take() {
+            s.panel_reports.bind(&pane_id, session_id);
+        }
         let tab_id = target.tab_id();
         // La pestaña pudo desaparecer mientras la sesión estaba en vuelo.
         if s.tab_by_id_mut(tab_id).is_none() {
