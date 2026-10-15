@@ -33,9 +33,12 @@ pub struct MobilePlugin {
     bridge: Arc<Bridge>,
     /// Directorio de servicios, que llega al registrarse.
     ///
+    /// Va en un `Arc` aparte para que el cierre que sirve a los clientes pueda
+    /// seguir pidiendo el modelo después de que el plugin pase a ser propiedad
+    /// del registro: un `&self` no viviría lo suficiente para el hilo.
     /// Se guarda porque el modelo se pide después, cuando un cliente entra: para
     /// entonces todos los plugins ya publicaron lo suyo.
-    services: Mutex<Option<Arc<Services>>>,
+    services: Arc<Mutex<Option<Arc<Services>>>>,
 }
 
 impl MobilePlugin {
@@ -43,8 +46,14 @@ impl MobilePlugin {
     pub fn new(bridge: Arc<Bridge>) -> Self {
         Self {
             bridge,
-            services: Mutex::new(None),
+            services: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// El slot compartido del directorio: lo que el cierre del servidor usa
+    /// para pedir el modelo en cada conexión nueva.
+    pub(crate) fn services_slot(&self) -> Arc<Mutex<Option<Arc<Services>>>> {
+        Arc::clone(&self.services)
     }
 
     /// El puente compartido, para que quien arme el servidor lo use.
@@ -57,7 +66,12 @@ impl MobilePlugin {
     /// El modelo se pide al plugin que lo tiene y la sesión inicial es la que el
     /// escritorio tiene a la vista, para que el teléfono empiece donde uno está.
     pub fn view(&self) -> InitialView {
-        let layout = self.layout();
+        Self::initial_view(&self.services)
+    }
+
+    /// Vista inicial a partir del slot compartido, para el hilo del servidor.
+    pub(crate) fn initial_view(services: &Mutex<Option<Arc<Services>>>) -> InitialView {
+        let layout = Self::layout_of(services);
         let session = layout
             .spaces
             .get(layout.active_space)
@@ -67,14 +81,9 @@ impl MobilePlugin {
         InitialView { layout, session }
     }
 
-    /// El modelo de espacios, pedido a quien lo publica.
-    ///
-    /// Sin servicio o con una respuesta que no se entiende se devuelve un modelo
-    /// vacío: un teléfono sin espacios configurados es peor que nada, pero mucho
-    /// mejor que una terminal que no abre.
-    fn layout(&self) -> Layout {
-        let Some(services) = self
-            .services
+    /// Modelo pedido a quien lo publica, a partir del slot compartido.
+    pub(crate) fn layout_of(services: &Mutex<Option<Arc<Services>>>) -> Layout {
+        let Some(services) = services
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()

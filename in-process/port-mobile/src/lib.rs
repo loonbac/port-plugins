@@ -13,3 +13,6 @@ pub mod plugin;
 pub mod protocol;
 pub mod server;
 pub mod socket;
+pub mod startup;
+
+pub use crate::plugin::MobilePlugin;

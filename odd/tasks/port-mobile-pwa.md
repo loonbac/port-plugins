@@ -169,3 +169,9 @@ customizarlo al 100».
 L4 (hallazgo que define la fase 1): la API de plugins no expone hoy ni leer la
 rejilla ni escribir entrada, así que M1 es un requisito previo y no un detalle
 de implementación. Es la misma clase de capacidad genérica que `PtyConfig.env`.
+
+L5 (cierre de M2, verificado): arranque del plugin móvil (`MobilePlugin::start()`):
+token por dispositivo en `~/.config/port/mobile-token` (0600, 32 bytes, se regenera
+si está roto, override `PORT_MOBILE_TOKEN`); assets en `PORT_MOBILE_ASSETS` o
+`<exe>/../share/port/mobile`, cerrado sin directorio; registro en PORT (`main.rs`).
+43 pruebas + clippy + fmt en verde, `cargo build -p port` en verde (todo bajo nix-shell).
