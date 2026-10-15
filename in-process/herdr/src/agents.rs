@@ -240,12 +240,7 @@ impl AgentWatcher {
     }
 
     /// Publica una instantánea recién calculada en memoria fuera de cualquier lock.
-    pub fn publish_scan(
-        &mut self,
-        fresh: Vec<AgentEntry>,
-        stamp: Option<SystemTime>,
-        now_ms: u64,
-    ) {
+    pub fn publish_scan(&mut self, fresh: Vec<AgentEntry>, stamp: Option<SystemTime>, now_ms: u64) {
         self.cached = fresh;
         self.stamp = stamp;
         self.last_refresh_ms = now_ms;
@@ -343,7 +338,11 @@ pub fn spawn_background_refresher(
                 // 2a. Leemos el modo de acento con lock de lectura breve.
                 let (accent_mode, accent_stale, last_accent_fetch_ms) = {
                     let s = arc_state.read().unwrap();
-                    (s.accent_mode.clone(), s.accent_stale, s.last_accent_fetch_ms)
+                    (
+                        s.accent_mode.clone(),
+                        s.accent_stale,
+                        s.last_accent_fetch_ms,
+                    )
                 };
                 drop(arc_state);
 
@@ -406,18 +405,19 @@ pub fn spawn_background_refresher(
                     if let Some(arc) = weak_state.upgrade() {
                         let mut s = arc.write().unwrap();
                         for (cwd, branch) in detected {
-                            s.git_branch_cache.insert(cwd.clone(), (branch.clone(), now));
-                            let matching_indices: Vec<usize> = s
-                                .spaces
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(idx, space)| {
-                                    let matches = space.tabs.iter().any(|t| {
-                                        s.session_cwds.get(&t.session_id) == Some(&cwd)
-                                    });
-                                    matches.then_some(idx)
-                                })
-                                .collect();
+                            s.git_branch_cache
+                                .insert(cwd.clone(), (branch.clone(), now));
+                            let matching_indices: Vec<usize> =
+                                s.spaces
+                                    .iter()
+                                    .enumerate()
+                                    .filter_map(|(idx, space)| {
+                                        let matches = space.tabs.iter().any(|t| {
+                                            s.session_cwds.get(&t.session_id) == Some(&cwd)
+                                        });
+                                        matches.then_some(idx)
+                                    })
+                                    .collect();
                             for idx in matching_indices {
                                 s.spaces[idx].branch = branch.clone();
                             }
