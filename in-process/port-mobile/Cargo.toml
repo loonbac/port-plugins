@@ -10,6 +10,7 @@ name = "port_plugin_mobile"
 path = "src/lib.rs"
 
 [dependencies]
+port-term-core.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
 tungstenite = { version = "0.30.0", default-features = false }

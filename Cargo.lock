@@ -3985,6 +3985,7 @@ dependencies = [
 name = "port-plugin-mobile"
 version = "0.1.0"
 dependencies = [
+ "port-term-core",
  "serde",
  "serde_json",
  "tungstenite",
