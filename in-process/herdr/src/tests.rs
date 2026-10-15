@@ -234,17 +234,46 @@ fn los_hooks_de_layout_leen_la_instantanea_sin_acceder_al_disco_ni_bloquear() {
     let presence = seed_watch_agent("snapshot-no-io");
     let plugin = HerdrPlugin::with_presence_dir(&presence);
 
+    // El vigilante carga la instantánea en segundo plano: se espera a que esté
+    // lista en vez de asumir que ya llegó.
+    let cargada = || {
+        for _ in 0..2_000 {
+            if !plugin.agents.lock().unwrap().snapshot().is_empty() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        false
+    };
+    assert!(cargada(), "el vigilante no cargó la instantánea");
+
     // Los hooks devuelven el layout con la instantánea en memoria
     assert!(plugin.left_sidebar_width() > 0.0);
     assert!(plugin.left_sidebar().is_some());
 
-    // Borramos el directorio de presencia completamente
+    // Borramos el directorio de presencia completamente.
     let _ = std::fs::remove_dir_all(&presence);
 
-    // Los hooks siguen respondiendo sin bloquearse ni fallar porque no tocan el disco
+    // Los hooks siguen respondiendo sin bloquearse ni fallar porque no tocan el
+    // disco. La respuesta tiene que seguir a la memoria: si la instantánea
+    // tenía sesiones antes y después de la llamada, la barra debe pintarse.
+    //
+    // La comparación se hace alrededor de cada llamada, y no contra un valor
+    // fijo, porque el vigilante puede vaciar la instantánea en cuanto el
+    // directorio desaparece: eso es correcto y pasa en su propio hilo, así que
+    // el único caso que prueba algo es aquel en el que la memoria no cambió.
     for _ in 0..10 {
-        assert!(plugin.left_sidebar_width() > 0.0);
-        assert!(plugin.left_sidebar().is_some());
+        let antes = plugin.agents.lock().unwrap().snapshot().len();
+        let width = plugin.left_sidebar_width();
+        let sidebar = plugin.left_sidebar();
+        let despues = plugin.agents.lock().unwrap().snapshot().len();
+        if antes > 0 && despues > 0 {
+            assert!(width > 0.0, "la barra ignoró la instantánea en memoria");
+        }
+        // El directorio borrado no vuelve, así que la instantánea solo puede
+        // encogerse: si tiene sesiones al terminar, las tenía durante la
+        // llamada, y entonces la barra no puede haberse ocultado.
+        assert!(sidebar.is_some() || despues == 0);
     }
 }
 
@@ -2518,6 +2547,99 @@ fn arrastrar_pide_animacion_aunque_no_haya_agentes() {
     plugin.state.write().unwrap().begin_space_drag(0, 100.0);
     assert!(needs());
     plugin.state.write().unwrap().end_space_drag();
+    assert!(!needs());
+}
+
+/// Avanza la animación con un reloj simulado hasta que se detenga.
+///
+/// Devuelve cuántos cuadros hicieron falta; es la forma de comprobar que el
+/// movimiento termina y no se queda pidiendo cuadros para siempre.
+fn asentar_animacion(plugin: &HerdrPlugin) -> u32 {
+    let mut t = 1_000u64;
+    for frame in 0..600 {
+        t += 16;
+        let mut s = plugin.state.write().unwrap();
+        if !s.step_space_motion(t) {
+            return frame + 1;
+        }
+    }
+    panic!("la animación no se detuvo en 600 cuadros");
+}
+
+#[test]
+fn las_vecinas_se_deslizan_en_vez_de_saltar() {
+    let presence = empty_presence("drag-desliza");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
+    plugin.state.write().unwrap().move_space_drag(123.0);
+
+    // La vecina que ocupó la ranura de la arrastrada arranca desplazada un paso
+    // de tarjeta: eso es lo que se ve como deslizamiento en vez de salto.
+    {
+        let s = plugin.state.read().unwrap();
+        let vecina = s.space_motion.springs[0].value().abs();
+        assert!(vecina > 1.0, "la vecina saltó sin deslizarse: {vecina}");
+        assert!(s.space_motion_active());
+    }
+
+    asentar_animacion(&plugin);
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.space_motion.springs[0].value(), 0.0);
+}
+
+#[test]
+fn la_tarjeta_arrastrada_sigue_al_puntero() {
+    let presence = empty_presence("drag-sigue");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
+    // Un movimiento que cruza medio paso: la tarjeta pasa a la ranura 1 y el
+    // ancla se recentra en 145, así que el puntero (123) quedó 22 px por encima.
+    plugin.state.write().unwrap().move_space_drag(123.0);
+
+    let mut t = 1_000u64;
+    let mut s = plugin.state.write().unwrap();
+    for _ in 0..60 {
+        t += 16;
+        s.step_space_motion(t);
+    }
+    let offset = s.space_motion.springs[1].value();
+    drop(s);
+
+    assert!(
+        (offset - (-22.0)).abs() < 1.0,
+        "la tarjeta debería seguir al puntero 22 px arriba: {offset}"
+    );
+}
+
+#[test]
+fn soltar_asienta_la_tarjeta_y_la_animacion_termina() {
+    let presence = empty_presence("drag-asienta");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
+    plugin.state.write().unwrap().move_space_drag(123.0);
+    plugin.state.write().unwrap().end_space_drag();
+
+    // Ya soltada, la tarjeta sigue fuera de su ranura: los cuadros deben seguir
+    // fluyendo para que el resorte la asiente, no quedar congelada a mitad.
+    let needs = || plugin.layout_hook().expect("layout").needs_animation();
+    assert!(needs());
+    assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
+
+    asentar_animacion(&plugin);
+
+    let s = plugin.state.read().unwrap();
+    assert!(
+        s.space_motion
+            .springs
+            .iter()
+            .all(|spring| spring.value() == 0.0),
+        "quedaron tarjetas desplazadas"
+    );
+    assert_eq!(s.space_motion.lift, 0.0);
+    drop(s);
     assert!(!needs());
 }
 

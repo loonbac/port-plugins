@@ -7,13 +7,15 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    div, px, rgb, AnyElement, FontWeight, IntoElement, MouseButton, ParentElement, Styled, Window,
+    black, div, point, px, rgb, AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton,
+    ParentElement, Styled, Window,
 };
 
 use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 
 use crate::agents;
+use crate::anim::ease_out_cubic;
 use crate::color::to_hsla;
 use crate::state::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
 use crate::watch::{clip_last_step, request_watch};
@@ -46,13 +48,21 @@ pub(crate) fn blink_on(now_ms: u64, period_ms: u64) -> bool {
 }
 
 pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
-    let state = plugin.state.read().unwrap();
+    // Un solo candado por cuadro: el mismo préstamo decide si la barra se pinta
+    // y avanza la animación. La ventana de escritura es corta a propósito (se
+    // cierra al copiar el estado, antes de construir los elementos).
+    let now_ms = agents::now_ms();
+    let mut state = plugin.state.write().unwrap();
     // El mismo criterio que reserva el ancho de la barra decide si se pinta
     // (ver `sidebar_shown`). Si sólo hay un espacio y no hay subagentes
     // visibles, la terminal es limpia.
     if !plugin.sidebar_shown(&state) {
         return None;
     }
+    // La animación de las tarjetas avanza aquí, una vez por cuadro, con el
+    // reloj del render: el plugin no tiene temporizadores propios. El mismo
+    // instante se reutiliza abajo para el spinner y los parpadeos.
+    state.step_space_motion(now_ms);
 
     let active_space_idx = state.active_space_index;
     let spaces = state.spaces.clone();
@@ -61,6 +71,15 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let state_sidebar_width = state.sidebar_width;
     let state_is_resizing = state.resize_anchor_x.is_some();
     let drag_index = state.space_drag.map(|drag| drag.index);
+    // Un desplazamiento por tarjeta, en el mismo orden que `spaces`: la
+    // arrastrada persigue al puntero y las demás vuelven a su ranura.
+    let card_offsets: Vec<f32> = state
+        .space_motion
+        .springs
+        .iter()
+        .map(|spring| spring.value())
+        .collect();
+    let drag_lift = state.space_motion.lift;
     let space_agent_states: Vec<Option<(AgentState, bool)>> = spaces
         .iter()
         .map(|space| space.aggregated_agent_state(&state.agents))
@@ -70,13 +89,21 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let warn_hsla = to_hsla(COLOR_BLOCKED);
     let success_hsla = to_hsla(COLOR_IDLE_UNSEEN);
     let term_bg = to_hsla(Rgb::DEFAULT_BG);
-    let mut spaces_list = div().flex().flex_col().gap(px(4.0));
+    let mut cards: Vec<AnyElement> = Vec::new();
 
     for (i, space) in spaces.iter().enumerate() {
         let is_active = i == active_space_idx;
         let dot_color = space.custom_color.map(to_hsla).unwrap_or(accent);
         let agent_state = space_agent_states[i];
         let is_dragged = drag_index == Some(i);
+        let card_offset = card_offsets.get(i).copied().unwrap_or(0.0);
+        // El realce crece y decrece con una curva en vez de encenderse de golpe:
+        // tomar la tarjeta se siente como levantarla, no como un interruptor.
+        let lifted = if is_dragged {
+            ease_out_cubic(drag_lift)
+        } else {
+            0.0
+        };
 
         // Realce de tarjeta: Blocked o Idle sin ver tiñen borde y fondo de la tarjeta con su color;
         // la tarjeta activa conserva el tinte de acento cuando no hay aviso.
@@ -88,21 +115,18 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             _ if is_active => (accent.opacity(0.20), accent.opacity(0.55)),
             _ => (term_bg.opacity(0.0), term_bg.opacity(0.0)),
         };
-        // Tarjeta arrastrada: levantada y pulsante para seguirla con la vista
-        // mientras se reordena en vivo.
+        // Tarjeta arrastrada: el tinte acento sube con el levantado y el borde
+        // se cierra del todo, para que se lea separada del resto de la lista.
         let (card_bg, card_border) = if is_dragged {
-            let lift = if blink_on(agents::now_ms(), 600) {
-                0.34
-            } else {
-                0.20
-            };
-            (accent.opacity(lift), accent)
+            (
+                accent.opacity(0.10 + 0.20 * lifted),
+                accent.opacity(0.45 + 0.55 * lifted),
+            )
         } else {
             (card_bg, card_border)
         };
 
         // Animación por reloj de render (ver `spinner_frame`/`blink_on`).
-        let now_ms = agents::now_ms();
         // Marcador a la derecha de la fila del nombre: glifo + texto corto según estado
         let marker = match agent_state {
             Some((AgentState::Working, _)) => Some((spinner_frame(now_ms), "working", accent)),
@@ -128,6 +152,12 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(6.0))
+            .cursor_grab()
+            // El desplazamiento entra como margen arriba y su negativo abajo:
+            // la tarjeta se corre sin empujar a las demás fuera de su ranura,
+            // que es lo que hace legible el reordenamiento en vivo.
+            .mt(px(card_offset))
+            .mb(px(-card_offset))
             .bg(card_bg)
             .border_1()
             .border_color(card_border)
@@ -223,8 +253,30 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             );
         }
 
-        spaces_list = spaces_list.child(item);
+        // La sombra entra con el levantado, en vez de encenderse entera en el
+        // primer cuadro. Un preset no se puede interpolar, así que la sombra se
+        // arma a mano con el alfa y el desenfoque del realce.
+        if lifted > 0.0 {
+            item = item.shadow(vec![BoxShadow {
+                color: black().opacity(0.42 * lifted),
+                offset: point(px(0.0), px(3.0)),
+                blur_radius: px(14.0 * lifted),
+                spread_radius: px(0.0),
+            }]);
+        }
+
+        cards.push(item.into_any_element());
     }
+
+    // La tarjeta arrastrada se pinta al final para quedar por encima de las
+    // demás mientras se desliza entre ellas.
+    if let Some(i) = drag_index {
+        if i < cards.len() {
+            let dragged = cards.remove(i);
+            cards.push(dragged);
+        }
+    }
+    let spaces_list = div().flex().flex_col().gap(px(4.0)).children(cards);
 
     // ── Sección AGENTS ──────────────────────────────────────────────────
     // Lista de subagentes de pi, en vivo. Los vivos van arriba y llevan el
@@ -554,6 +606,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .top(px(0.0))
             .h_full()
             .w(px(6000.0))
+            .cursor_grabbing()
             .on_mouse_move(move |event, window, _cx| {
                 let y: f32 = event.position.y.into();
                 let changed = state_for_move.write().unwrap().move_space_drag(y);

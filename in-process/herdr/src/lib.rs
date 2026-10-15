@@ -19,6 +19,7 @@ use port_plugin_api::{
 use crate::watch::request_watch;
 
 pub(crate) mod agents;
+pub(crate) mod anim;
 mod color;
 mod hooks;
 mod identity;

@@ -10,6 +10,7 @@ use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 use port_term_core::pty::RunningApp;
 
+use crate::anim::Spring;
 use crate::color::system_accent_color;
 
 /// Estado original de una pestaña que el visor de un subagente está ocupando.
@@ -111,8 +112,37 @@ pub(crate) struct SpaceDrag {
     pub index: usize,
     /// Coordenada Y donde empezó el tramo actual (se recentra en cada intercambio).
     pub anchor_y: f32,
+    /// Última coordenada Y del puntero, para dibujar la tarjeta siguiéndolo.
+    pub pointer_y: f32,
     /// `true` en cuanto el puntero superó el umbral: ya no es un clic.
     pub moved: bool,
+}
+
+/// Rigidez del resorte que sigue al puntero mientras se arrastra.
+///
+/// Alta a propósito: la tarjeta debe sentirse pegada al cursor, no flotando
+/// detrás. El resorte solo aporta un retardo mínimo que suaviza los saltos
+/// del puntero entre eventos.
+const DRAG_STIFFNESS: f32 = 900.0;
+/// Rigidez del resorte que desliza a las vecinas y asienta la tarjeta soltada.
+///
+/// Más blanda, para que el reacomodo se lea como movimiento y no como un salto.
+const SHIFT_STIFFNESS: f32 = 320.0;
+/// Duración del realce de levantado, en milisegundos.
+const LIFT_MS: f32 = 140.0;
+
+/// Animación de las tarjetas de espacio, en píxeles de desplazamiento.
+///
+/// Vive aparte del arrastre porque sobrevive a él: cuando se suelta la tarjeta
+/// el arrastre ya terminó pero el resorte sigue acomodándola.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SpaceMotion {
+    /// Un resorte por tarjeta, en el mismo orden que `spaces`.
+    pub springs: Vec<Spring>,
+    /// Realce de levantado de la tarjeta arrastrada, de 0 a 1.
+    pub lift: f32,
+    /// Momento del último cuadro simulado, para calcular el paso de tiempo.
+    pub last_frame_ms: Option<u64>,
 }
 
 impl HerdrSpace {
@@ -272,6 +302,9 @@ pub struct HerdrState {
     /// Arrastre de reordenamiento en curso. Mientras está presente, la sidebar
     /// muestra una capa que sigue al puntero hasta el `mouse_up`.
     pub(crate) space_drag: Option<SpaceDrag>,
+    /// Resortes y realce de las tarjetas de espacio: el movimiento que se ve
+    /// mientras se arrastra y después de soltar.
+    pub(crate) space_motion: SpaceMotion,
 }
 
 /// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
@@ -530,12 +563,24 @@ impl HerdrState {
     /// `end_space_drag` lo tratará como un clic normal.
     pub(crate) fn begin_space_drag(&mut self, index: usize, y: f32) {
         if index < self.spaces.len() {
+            self.sync_space_springs();
             self.space_drag = Some(SpaceDrag {
                 index,
                 anchor_y: y,
+                pointer_y: y,
                 moved: false,
             });
         }
+    }
+
+    /// Deja un resorte por tarjeta, en el mismo orden que `spaces`.
+    ///
+    /// Se llama antes de animar: crear o cerrar espacios cambia la lista y los
+    /// resortes tienen que seguirla para no desplazar a la tarjeta equivocada.
+    fn sync_space_springs(&mut self) {
+        self.space_motion
+            .springs
+            .resize(self.spaces.len(), Spring::new());
     }
 
     /// Avanza el arrastre a la coordenada Y indicada, intercambiando la tarjeta
@@ -544,34 +589,64 @@ impl HerdrState {
     /// Devuelve `true` si algo cambió (inicio del arrastre o algún intercambio)
     /// y hay que repintar.
     pub(crate) fn move_space_drag(&mut self, y: f32) -> bool {
-        let Some(drag) = self.space_drag.as_mut() else {
+        let Some(mut drag) = self.space_drag else {
             return false;
         };
+        drag.pointer_y = y;
         if !drag.moved && (y - drag.anchor_y).abs() < SPACE_DRAG_THRESHOLD {
+            self.space_drag = Some(drag);
             return false;
         }
         drag.moved = true;
+        self.sync_space_springs();
         while y - drag.anchor_y > SPACE_CARD_PITCH / 2.0 && drag.index + 1 < self.spaces.len() {
-            self.spaces.swap(drag.index, drag.index + 1);
-            if self.active_space_index == drag.index {
-                self.active_space_index = drag.index + 1;
-            } else if self.active_space_index == drag.index + 1 {
-                self.active_space_index = drag.index;
-            }
+            self.swap_space_slots(drag.index, drag.index + 1);
             drag.index += 1;
             drag.anchor_y += SPACE_CARD_PITCH;
         }
         while y - drag.anchor_y < -SPACE_CARD_PITCH / 2.0 && drag.index > 0 {
-            self.spaces.swap(drag.index, drag.index - 1);
-            if self.active_space_index == drag.index {
-                self.active_space_index = drag.index - 1;
-            } else if self.active_space_index == drag.index - 1 {
-                self.active_space_index = drag.index;
-            }
+            self.swap_space_slots(drag.index, drag.index - 1);
             drag.index -= 1;
             drag.anchor_y -= SPACE_CARD_PITCH;
         }
+        self.space_drag = Some(drag);
         true
+    }
+
+    /// Intercambia dos tarjetas y prepara el movimiento de la que no se arrastra.
+    ///
+    /// La tarjeta que llega a la ranura nueva arranca visualmente donde estaba
+    /// (un paso de distancia) y el resorte la lleva a su lugar, así el reacomodo
+    /// se lee como deslizamiento y no como salto. La arrastrada se excluye: esa
+    /// sigue al puntero, no a su ranura.
+    fn swap_space_slots(&mut self, a: usize, b: usize) {
+        let dragged = self.space_drag.map(|drag| drag.index);
+        self.spaces.swap(a, b);
+        self.space_motion.springs.swap(a, b);
+
+        // La tarjeta que sube (va a un índice menor) entra desde abajo y la que
+        // baja entra desde arriba; el signo del arranque conserva esa lectura.
+        let pitch = SPACE_CARD_PITCH;
+        let shift = |from: usize, to: usize| if to > from { -pitch } else { pitch };
+        // El arrastre trabaja con los índices de antes del intercambio; hay que
+        // saber dónde queda su resorte para no desplazarlo a él.
+        let dragged_after = match dragged {
+            Some(d) if d == a => Some(b),
+            Some(d) if d == b => Some(a),
+            other => other,
+        };
+        if dragged_after != Some(a) {
+            self.space_motion.springs[a].place(shift(b, a));
+        }
+        if dragged_after != Some(b) {
+            self.space_motion.springs[b].place(shift(a, b));
+        }
+
+        if self.active_space_index == a {
+            self.active_space_index = b;
+        } else if self.active_space_index == b {
+            self.active_space_index = a;
+        }
     }
 
     /// Termina el arrastre: selecciona la tarjeta arrastrada (haya sido clic o
@@ -581,6 +656,55 @@ impl HerdrState {
         if let Some(drag) = self.space_drag.take() {
             self.select_space_with_attention(drag.index);
         }
+    }
+
+    /// Avanza la animación de las tarjetas hasta `now_ms` y responde si algo se
+    /// sigue moviendo (para pedir otro cuadro).
+    pub(crate) fn step_space_motion(&mut self, now_ms: u64) -> bool {
+        self.sync_space_springs();
+        let dt_s = match self.space_motion.last_frame_ms {
+            Some(prev) => now_ms.saturating_sub(prev) as f32 / 1000.0,
+            None => 1.0 / 60.0,
+        };
+        self.space_motion.last_frame_ms = Some(now_ms);
+
+        // El realce de levantado sube de golpe al empezar el arrastre y baja al
+        // soltar; no persigue una posición, así que basta una curva.
+        let lift_target = if self.space_drag.is_some_and(|drag| drag.moved) {
+            1.0
+        } else {
+            0.0
+        };
+        let lift_step = (dt_s * 1000.0 / LIFT_MS).min(1.0);
+        let lift = self.space_motion.lift;
+        self.space_motion.lift = if lift_target > lift {
+            (lift + lift_step).min(1.0)
+        } else {
+            (lift - lift_step).max(0.0)
+        };
+
+        // Objetivo de cada tarjeta: la arrastrada persigue al puntero, el resto
+        // vuelve a su ranura.
+        let dragged = self.space_drag.filter(|drag| drag.moved);
+        let mut moving = (self.space_motion.lift - lift_target).abs() > 0.001;
+        for (i, spring) in self.space_motion.springs.iter_mut().enumerate() {
+            let (target, stiffness) = match dragged {
+                Some(drag) if drag.index == i => (drag.pointer_y - drag.anchor_y, DRAG_STIFFNESS),
+                _ => (0.0, SHIFT_STIFFNESS),
+            };
+            moving |= spring.step(target, dt_s, stiffness);
+        }
+        moving
+    }
+
+    /// `true` mientras la animación de tarjetas no está en reposo.
+    pub(crate) fn space_motion_active(&self) -> bool {
+        self.space_motion.lift > 0.001
+            || self
+                .space_motion
+                .springs
+                .iter()
+                .any(|spring| spring.value() != 0.0)
     }
 }
 
@@ -627,6 +751,7 @@ impl Default for HerdrState {
             git_branch_cache: HashMap::new(),
             agents: HashMap::new(),
             space_drag: None,
+            space_motion: SpaceMotion::default(),
         }
     }
 }

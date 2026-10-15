@@ -51,8 +51,10 @@ impl LayoutHook for HerdrPlugin {
     fn needs_animation(&self) -> bool {
         let s = self.state.read().unwrap();
         // Arrastrando una tarjeta, los cuadros deben seguir fluyendo para el
-        // reordenamiento en vivo y el resaltado pulsante.
-        if s.space_drag.is_some() {
+        // reordenamiento en vivo y el resaltado. Y aunque el arrastre haya
+        // terminado, los resortes siguen acomodando las tarjetas: sin cuadros
+        // se quedarían congeladas a mitad de camino.
+        if s.space_drag.is_some() || s.space_motion_active() {
             return true;
         }
         if !self.sidebar_shown(&s) {

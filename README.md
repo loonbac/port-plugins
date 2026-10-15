@@ -142,7 +142,9 @@ Notable behaviour:
   and subtle highlight when a task finishes unseen. Clicking a space that
   needs attention switches to the space and directly focuses the tab requiring
   it (first the blocked one waiting for reply, then the finished one).
-- Space cards can be dragged with the mouse to reorder them (releasing without
+- Space cards can be dragged with the mouse to reorder them: the dragged card
+  follows the pointer with a lifted shadow, its neighbours slide into place
+  instead of jumping, and it settles softly on release (releasing without
   moving still selects as before). New tabs inherit the folder of their
   space's active tab.
 
