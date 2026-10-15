@@ -13,9 +13,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use port_plugin_api::{
-    AppearanceHook, ConfigFile, InputHook, LayoutHook, Plugin, PluginConfig, SpaceHook,
+    AppearanceHook, ConfigFile, InputHook, LayoutHook, Plugin, PluginConfig, Service, SpaceHook,
 };
 
+use crate::layout_service::LayoutService;
 use crate::watch::request_watch;
 
 pub(crate) mod agents;
@@ -23,6 +24,7 @@ pub(crate) mod anim;
 mod color;
 mod hooks;
 mod identity;
+mod layout_service;
 mod panel_socket;
 pub(crate) mod presence;
 mod report;
@@ -447,6 +449,14 @@ impl Plugin for HerdrPlugin {
 
     fn space_hook(&self) -> Option<&dyn SpaceHook> {
         Some(self)
+    }
+
+    /// Publica el modelo de espacios y pestañas para que otro plugin lo use.
+    ///
+    /// Es lo que le permite al cliente móvil mostrar los mismos espacios sin
+    /// mantener una segunda copia del modelo.
+    fn services(&self) -> Vec<Arc<dyn Service>> {
+        vec![Arc::new(LayoutService::new(Arc::clone(&self.state)))]
     }
 
     fn layout_hook(&self) -> Option<&dyn LayoutHook> {
