@@ -27,6 +27,24 @@ const RESIZE_HANDLE_HIT: f32 = 7.0;
 const COLOR_BLOCKED: Rgb = Rgb::new(0xe5, 0x53, 0x4b);
 /// Color de éxito para agentes listos sin ver (`Idle` con `seen = false`).
 const COLOR_IDLE_UNSEEN: Rgb = Rgb::new(0x39, 0xc5, 0xcf);
+/// Periodo del parpadeo de aviso (`Blocked`), en milisegundos: encendido medio
+/// periodo, tenue medio periodo.
+const BLOCKED_BLINK_PERIOD_MS: u64 = 1000;
+/// Cuadros del spinner braille para `Working`, a 80 ms por cuadro.
+const SPINNER_FRAMES: [&str; 10] =
+    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_FRAME_MS: u64 = 80;
+
+/// Cuadro del spinner según el reloj: avanza solo con cada render, sin timers
+/// ni estado extra, porque la sidebar se repinta a ~60 fps por el latido del PTY.
+pub(crate) fn spinner_frame(now_ms: u64) -> &'static str {
+    SPINNER_FRAMES[(now_ms / SPINNER_FRAME_MS) as usize % SPINNER_FRAMES.len()]
+}
+
+/// `true` durante la primera mitad de cada periodo: parpadeo simple.
+pub(crate) fn blink_on(now_ms: u64, period_ms: u64) -> bool {
+    period_ms > 0 && now_ms % period_ms < period_ms / 2
+}
 
 pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let state = plugin.state.read().unwrap();
@@ -70,10 +88,21 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             _ => (term_bg.opacity(0.0), term_bg.opacity(0.0)),
         };
 
+        // Animación por reloj de render (ver `spinner_frame`/`blink_on`).
+        let now_ms = agents::now_ms();
         // Marcador a la derecha de la fila del nombre: glifo + texto corto según estado
         let marker = match agent_state {
-            Some((AgentState::Working, _)) => Some(("●", "working", accent)),
-            Some((AgentState::Blocked, _)) => Some(("●", "espera tu respuesta", warn_hsla)),
+            Some((AgentState::Working, _)) => {
+                Some((spinner_frame(now_ms), "working", accent))
+            }
+            Some((AgentState::Blocked, _)) => {
+                let color = if blink_on(now_ms, BLOCKED_BLINK_PERIOD_MS) {
+                    warn_hsla
+                } else {
+                    warn_hsla.opacity(0.25)
+                };
+                Some(("●", "espera tu respuesta", color))
+            }
             Some((AgentState::Idle, false)) => Some(("✓", "listo", success_hsla)),
             Some((AgentState::Idle, true)) | Some((AgentState::Unknown, _)) | None => None,
         };
@@ -500,4 +529,28 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     }
 
     Some(shell.into_any_element())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spinner_avanza_por_cuadros_de_80ms_y_envuelve() {
+        assert_eq!(spinner_frame(0), "⠋");
+        assert_eq!(spinner_frame(79), "⠋");
+        assert_eq!(spinner_frame(80), "⠙");
+        assert_eq!(spinner_frame(799), "⠏");
+        assert_eq!(spinner_frame(800), "⠋");
+    }
+
+    #[test]
+    fn parpadeo_encendido_solo_la_primera_mitad() {
+        assert!(blink_on(0, 1000));
+        assert!(blink_on(499, 1000));
+        assert!(!blink_on(500, 1000));
+        assert!(!blink_on(999, 1000));
+        assert!(blink_on(1000, 1000));
+        assert!(!blink_on(10, 0));
+    }
 }
