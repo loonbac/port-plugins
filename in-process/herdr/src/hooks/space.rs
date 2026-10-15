@@ -54,6 +54,16 @@ impl SpaceHook for HerdrPlugin {
         }
     }
 
+    /// Entorno de herdr que se anuncia al panel que está por lanzarse.
+    ///
+    /// El núcleo lo suma al config del panel, así que la aplicación que corra
+    /// dentro encuentra su socket y el ejecutable compatible, y puede reportar
+    /// lo que hace sin que nadie tenga que configurarlo a mano.
+    fn session_env(&self) -> Vec<(String, String)> {
+        let s = self.state.read().unwrap();
+        s.pending_panel_env()
+    }
+
     /// Petición de una sesión que corre el visor de un subagente.
     ///
     /// Mientras el shell del espacio está en vuelo devuelve `None` y deja la
@@ -123,6 +133,7 @@ impl SpaceHook for HerdrPlugin {
                         s.in_flight = Some(InFlight::Shell(tab_id));
                         return Some(PtyConfig {
                             cwd: Some(cwd.to_string_lossy().into_owned()),
+                            env: s.pending_panel_env(),
                             ..PtyConfig::default()
                         });
                     }

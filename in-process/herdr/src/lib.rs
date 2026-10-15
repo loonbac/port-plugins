@@ -69,10 +69,14 @@ pub struct HerdrPlugin {
 /// Sin ella no se abre ningún socket: publicar esa superficie es una decisión
 /// de quien lanza el plugin, no un efecto de cargarlo.
 pub(crate) const PANEL_SOCKET_ENV: &str = "PORT_HERDR_SOCKET";
+/// Variable que fuerza el ejecutable compatible que se anuncia a los paneles.
+const PANEL_BIN_ENV: &str = "PORT_HERDR_BIN";
+/// Nombre del ejecutable compatible, tal como lo instala el paquete.
+const PANEL_BIN_NAME: &str = "port-herdr";
 
-/// Arranca el socket de paneles si el entorno declara dónde escuchar.
+/// Arranca el socket de paneles si el plugin tiene declarado dónde escuchar.
 fn spawn_panel_socket(state: &Arc<RwLock<HerdrState>>) {
-    let Some(path) = panel_socket_path() else {
+    let Some(path) = state.read().unwrap().panel_env.socket.clone() else {
         return;
     };
     if let Err(error) = panel_socket::spawn(Arc::clone(state), &path) {
@@ -94,6 +98,28 @@ fn panel_socket_path() -> Option<PathBuf> {
     Some(PathBuf::from(raw))
 }
 
+/// Ejecutable compatible que se anuncia a los paneles.
+///
+/// Junto al ejecutable de PORT es donde lo deja el paquete, y así no depende de
+/// cómo esté el `PATH` del proceso que arranca la terminal; si no está ahí se
+/// anuncia el nombre pelado y lo resolverá el `PATH`.
+fn resolve_panel_bin() -> PathBuf {
+    if let Some(raw) = std::env::var_os(PANEL_BIN_ENV) {
+        if !raw.is_empty() {
+            return PathBuf::from(raw);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(PANEL_BIN_NAME);
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from(PANEL_BIN_NAME)
+}
+
 impl HerdrPlugin {
     /// Crea una nueva instancia del plugin Herdr con valores por defecto.
     pub fn new() -> Self {
@@ -113,6 +139,10 @@ impl HerdrPlugin {
         let agents = Arc::new(std::sync::Mutex::new(watcher));
         let initial_state = HerdrState {
             last_accent_fetch_ms: now,
+            panel_env: crate::state::PanelEnv {
+                socket: panel_socket_path(),
+                bin: resolve_panel_bin(),
+            },
             ..HerdrState::default()
         };
         let state = Arc::new(RwLock::new(initial_state));

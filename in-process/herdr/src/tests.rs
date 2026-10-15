@@ -2781,3 +2781,92 @@ fn la_sesion_nueva_enlaza_el_panel_que_se_anuncio() {
     assert_eq!(s.panel_reports.session(&panel), Some(41));
     assert!(s.pending_panel.is_none(), "el panel pendiente se consume");
 }
+
+/// Sin socket declarado no se anuncia nada.
+///
+/// La superficie se publica sólo si existe: anunciar un socket que nadie
+/// atiende dejaría a la aplicación escribiendo a un tubo roto.
+#[test]
+fn sin_socket_no_se_anuncia_entorno_de_panel() {
+    let presence = empty_presence("sin-socket");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+    assert!(plugin.take_new_session_request());
+    assert!(plugin.session_env().is_empty());
+}
+
+/// Con socket declarado, el panel nuevo recibe el entorno de herdr completo.
+#[test]
+fn el_panel_nuevo_recibe_el_entorno_de_herdr() {
+    let presence = empty_presence("entorno-panel");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    let socket = PathBuf::from("/tmp/port-herdr-de-prueba.sock");
+    {
+        let mut s = plugin.state.write().unwrap();
+        s.panel_env.socket = Some(socket.clone());
+        s.panel_env.bin = PathBuf::from("/usr/bin/port-herdr");
+    }
+    let tab_id = plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+    assert!(plugin.take_new_session_request());
+
+    let env = plugin.session_env();
+    let valor = |clave: &str| {
+        env.iter()
+            .find(|(nombre, _)| nombre == clave)
+            .map(|(_, valor)| valor.as_str())
+    };
+    assert_eq!(valor("HERDR_ENV"), Some("1"));
+    assert_eq!(
+        valor("HERDR_SOCKET_PATH"),
+        Some(socket.to_string_lossy().as_ref())
+    );
+    assert_eq!(valor("HERDR_BIN_PATH"), Some("/usr/bin/port-herdr"));
+    assert_eq!(
+        valor("HERDR_PANE_ID"),
+        Some(crate::state::panel_id(tab_id).as_str())
+    );
+}
+
+/// La pestaña con carpeta heredada anuncia el mismo entorno de panel.
+///
+/// Ese camino arma su propio `PtyConfig`, así que el entorno tiene que viajar
+/// por ahí también o la pestaña nueva quedaría muda.
+#[test]
+fn la_pestana_con_cwd_tambien_lleva_el_entorno() {
+    let presence = empty_presence("entorno-cwd");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    plugin.state.write().unwrap().panel_env.socket = Some(PathBuf::from("/tmp/x.sock"));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .session_cwds
+        .insert(0, PathBuf::from("/tmp/proyecto"));
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .create_pending_tab_in_active_space()
+        .expect("tab");
+
+    let config = plugin.take_spawn_session_request().expect("spawn con cwd");
+    assert_eq!(config.cwd.as_deref(), Some("/tmp/proyecto"));
+    assert!(
+        config
+            .env
+            .iter()
+            .any(|(clave, _)| clave == "HERDR_SOCKET_PATH"),
+        "la pestaña con cwd no anunció su panel: {:?}",
+        config.env
+    );
+}

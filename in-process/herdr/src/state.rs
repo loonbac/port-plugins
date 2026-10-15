@@ -367,6 +367,19 @@ impl PanelReports {
     }
 }
 
+/// Dónde publica el plugin su superficie de intercepción.
+///
+/// Se resuelve una sola vez, al construir el plugin, para que anunciar el
+/// entorno de un panel no dependa de mirar el proceso ni el sistema de archivos
+/// en cada lanzamiento.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PanelEnv {
+    /// Socket propio del plugin, si se declaró dónde escuchar.
+    pub socket: Option<PathBuf>,
+    /// Ejecutable compatible que se anuncia a los paneles.
+    pub bin: PathBuf,
+}
+
 /// Identidad de panel que el plugin anuncia al lanzar una sesión.
 ///
 /// PORT no copia el formato de herdr (`w1:p2`): el id sólo tiene que ser único
@@ -452,6 +465,8 @@ pub struct HerdrState {
     pub(crate) panel_reports: PanelReports,
     /// Panel acuñado para el lanzamiento en vuelo, a la espera de su sesión.
     pub(crate) pending_panel: Option<String>,
+    /// Dónde se publica la superficie de intercepción.
+    pub(crate) panel_env: PanelEnv,
     /// Arrastre de reordenamiento en curso. Mientras está presente, la sidebar
     /// muestra una capa que sigue al puntero hasta el `mouse_up`.
     pub(crate) space_drag: Option<SpaceDrag>,
@@ -860,6 +875,31 @@ impl HerdrState {
                 .any(|spring| spring.value() != 0.0)
     }
 
+    /// Entorno que se anuncia al panel que está por lanzarse.
+    ///
+    /// Vacío cuando el plugin no escucha en ningún socket: la superficie se
+    /// publica sólo si existe, para no anunciar a la aplicación un socket que
+    /// nadie atiende.
+    pub(crate) fn pending_panel_env(&self) -> Vec<(String, String)> {
+        let (Some(socket), Some(pane)) =
+            (self.panel_env.socket.as_ref(), self.pending_panel.as_ref())
+        else {
+            return Vec::new();
+        };
+        vec![
+            ("HERDR_ENV".to_string(), "1".to_string()),
+            (
+                "HERDR_SOCKET_PATH".to_string(),
+                socket.to_string_lossy().into_owned(),
+            ),
+            (
+                "HERDR_BIN_PATH".to_string(),
+                self.panel_env.bin.to_string_lossy().into_owned(),
+            ),
+            ("HERDR_PANE_ID".to_string(), pane.clone()),
+        ]
+    }
+
     /// Aplica un informe de panel ya validado.
     ///
     /// Un panel desconocido es un error del contrato, no un detalle: quien
@@ -938,6 +978,7 @@ impl Default for HerdrState {
             space_motion: SpaceMotion::default(),
             panel_reports: PanelReports::default(),
             pending_panel: None,
+            panel_env: PanelEnv::default(),
         }
     }
 }
