@@ -302,3 +302,37 @@ async fn una_pestana_corta_conserva_su_ancho_natural(cx: &mut TestAppContext) {
         bounds[1]
     );
 }
+
+/// Una tarjeta con un agente en estado `Blocked` pinta su marcador de atención
+/// (`herdr-sidebar-space-agent-{i}`) dentro del panel lateral.
+#[gpui::test]
+async fn una_tarjeta_con_agente_blocked_pinta_su_marcador(cx: &mut TestAppContext) {
+    let presence = empty_presence("layout-blocked");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    {
+        let mut s = plugin.state.write().unwrap();
+        let tabs = s.spaces[0].tabs.clone();
+        s.spaces[0] = espacio("space-1", "main", tabs);
+        // Segundo espacio para que la barra se dibuje fija
+        let mut p = pestana(10, "pi");
+        p.session_id = 10;
+        s.spaces.push(espacio("space-2", "main", vec![p]));
+        s.agents
+            .insert(10, (port_plugin_api::AgentState::Blocked, false));
+    }
+
+    let plugin = Rc::new(plugin);
+    let barra = Rc::clone(&plugin);
+    let bounds = medir_en_vista(
+        cx,
+        move || barra.left_sidebar().expect("la barra lateral se pinta"),
+        &[PANEL_LATERAL, "herdr-sidebar-space-agent-1"],
+    );
+
+    assert_eq!(
+        bounds[0].size.width,
+        px(SIDEBAR_DEFAULT_WIDTH),
+        "el panel mide el ancho que reserva el plugin"
+    );
+    assert_dentro(&bounds[1], &bounds[0], "el marcador de agente blocked");
+}

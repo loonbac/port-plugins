@@ -136,6 +136,12 @@ Notable behaviour:
 - Long folder names, branch names and tab titles are truncated with `…` instead
   of overflowing the sidebar or the tab bar. The new-tab button stays at the
   right end of the tab bar, so it remains reachable with many tabs open.
+- Shows the aggregated agent state of sessions in the sidebar:
+  `working` with an accent-coloured dot, `espera tu respuesta` with a warning
+  dot and card highlight when an agent is blocked, and `listo` with a checkmark
+  and subtle highlight when a task finishes unseen. Clicking a space that
+  needs attention switches to the space and directly focuses the tab requiring
+  it (first the blocked one waiting for reply, then the finished one).
 
 ### `close-guard`
 

@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use port_plugin_api::SpaceHook;
+use port_plugin_api::{AgentState, SpaceHook};
 use port_term_core::pty::{PtyConfig, RunningApp};
 
 use crate::state::{default_space, InFlight, WatchedTab, PENDING_SESSION};
@@ -183,6 +183,11 @@ impl SpaceHook for HerdrPlugin {
         }
     }
 
+    fn update_session_agent(&self, session_id: usize, state: AgentState, seen: bool) {
+        let mut s = self.state.write().unwrap();
+        s.agents.insert(session_id, (state, seen));
+    }
+
     fn take_close_session_request(&self) -> Option<usize> {
         let mut s = self.state.write().unwrap();
         s.close_session_requested.take()
@@ -190,6 +195,8 @@ impl SpaceHook for HerdrPlugin {
 
     fn on_session_closed(&self, session_id: usize) {
         let mut s = self.state.write().unwrap();
+        // Elimina el estado de agente de la sesión cerrada.
+        s.agents.remove(&session_id);
         // La sesión ya no existe: el visor nunca debe devolver una pestaña a ella.
         s.closed_sessions.insert(session_id);
 

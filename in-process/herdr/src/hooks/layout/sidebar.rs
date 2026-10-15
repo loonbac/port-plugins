@@ -10,6 +10,7 @@ use gpui::{
     div, px, rgb, AnyElement, FontWeight, IntoElement, MouseButton, ParentElement, Styled, Window,
 };
 
+use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 
 use crate::agents;
@@ -21,6 +22,11 @@ use crate::HerdrPlugin;
 /// Zona sensible del asidero, en píxeles. Centrada en el borde, se extiende
 /// medio ancho a cada lado para que el arrastre no sea preciso al píxel.
 const RESIZE_HANDLE_HIT: f32 = 7.0;
+
+/// Color de aviso para agentes bloqueados (`Blocked`).
+const COLOR_BLOCKED: Rgb = Rgb::new(0xe5, 0x53, 0x4b);
+/// Color de éxito para agentes listos sin ver (`Idle` con `seen = false`).
+const COLOR_IDLE_UNSEEN: Rgb = Rgb::new(0x39, 0xc5, 0xcf);
 
 pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let state = plugin.state.read().unwrap();
@@ -37,28 +43,48 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let accent = to_hsla(state.effective_accent());
     let state_sidebar_width = state.sidebar_width;
     let state_is_resizing = state.resize_anchor_x.is_some();
+    let space_agent_states: Vec<Option<(AgentState, bool)>> = spaces
+        .iter()
+        .map(|space| space.aggregated_agent_state(&state.agents))
+        .collect();
     drop(state);
 
+    let warn_hsla = to_hsla(COLOR_BLOCKED);
+    let success_hsla = to_hsla(COLOR_IDLE_UNSEEN);
     let term_bg = to_hsla(Rgb::DEFAULT_BG);
     let mut spaces_list = div().flex().flex_col().gap(px(4.0));
 
     for (i, space) in spaces.iter().enumerate() {
         let is_active = i == active_space_idx;
         let dot_color = space.custom_color.map(to_hsla).unwrap_or(accent);
+        let agent_state = space_agent_states[i];
 
-        // Fondo y borde del espacio: transparente con tinte del acento si está activo
-        let (card_bg, card_border) = if is_active {
-            (accent.opacity(0.20), accent.opacity(0.55))
-        } else {
-            (term_bg.opacity(0.0), term_bg.opacity(0.0))
+        // Realce de tarjeta: Blocked o Idle sin ver tiñen borde y fondo de la tarjeta con su color;
+        // la tarjeta activa conserva el tinte de acento cuando no hay aviso.
+        let (card_bg, card_border) = match agent_state {
+            Some((AgentState::Blocked, _)) => (warn_hsla.opacity(0.20), warn_hsla.opacity(0.55)),
+            Some((AgentState::Idle, false)) => {
+                (success_hsla.opacity(0.12), success_hsla.opacity(0.40))
+            }
+            _ if is_active => (accent.opacity(0.20), accent.opacity(0.55)),
+            _ => (term_bg.opacity(0.0), term_bg.opacity(0.0)),
+        };
+
+        // Marcador a la derecha de la fila del nombre: glifo + texto corto según estado
+        let marker = match agent_state {
+            Some((AgentState::Working, _)) => Some(("●", "working", accent)),
+            Some((AgentState::Blocked, _)) => Some(("●", "espera tu respuesta", warn_hsla)),
+            Some((AgentState::Idle, false)) => Some(("✓", "listo", success_hsla)),
+            Some((AgentState::Idle, true)) | Some((AgentState::Unknown, _)) | None => None,
         };
 
         let state_for_click = Arc::clone(&plugin.state);
-        let item = div()
+        let mut item = div()
             .flex()
             .flex_row()
             .items_center()
             .justify_between()
+            .gap(px(8.0))
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(6.0))
@@ -69,7 +95,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 MouseButton::Left,
                 move |_event, window: &mut Window, _cx| {
                     let mut s = state_for_click.write().unwrap();
-                    s.active_space_index = i;
+                    s.select_space_with_attention(i);
                     window.refresh();
                 },
             )
@@ -107,9 +133,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     // Clave de las pruebas de layout (ver
                                     // `layout_test`): permite medir que el
                                     // texto no sale del panel.
-                                    .debug_selector(move || {
-                                        format!("herdr-sidebar-space-name-{i}")
-                                    })
+                                    .debug_selector(move || format!("herdr-sidebar-space-name-{i}"))
                                     .text_color(if is_active {
                                         rgb(0xf0f6fc)
                                     } else {
@@ -133,6 +157,28 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             ),
                     ),
             );
+
+        if let Some((glyph, text, color)) = marker {
+            item = item.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(4.0))
+                    .debug_selector(move || format!("herdr-sidebar-space-agent-{i}"))
+                    .child(div().text_size(px(10.0)).text_color(color).child(glyph))
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .font_weight(FontWeight::BOLD)
+                            .truncate()
+                            .text_color(color)
+                            .debug_selector(move || format!("herdr-sidebar-space-agent-text-{i}"))
+                            .child(text),
+                    ),
+            );
+        }
 
         spaces_list = spaces_list.child(item);
     }

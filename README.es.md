@@ -139,6 +139,13 @@ Comportamiento destacado:
   en vez de desbordar la barra lateral o la de pestañas. El botón de nueva
   pestaña queda anclado al extremo derecho, así que sigue alcanzable con muchas
   pestañas abiertas.
+- Muestra el estado agregado de agente de las sesiones en la barra lateral:
+  `working` con punto en color de acento, `espera tu respuesta` con punto y
+  realce en color de aviso cuando un agente queda bloqueado, y `listo` con marca
+  de verificación y realce tenue cuando termina sin haberse visto. Al hacer clic
+  en un espacio con atención, la terminal no solo cambia al espacio sino que
+  selecciona directamente la pestaña que la requiere (primero la que espera
+  respuesta y luego la que terminó).
 
 ### `close-guard`
 

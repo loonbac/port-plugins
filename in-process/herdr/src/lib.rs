@@ -78,14 +78,13 @@ impl HerdrPlugin {
         let now = agents::now_ms();
         watcher.entries(now);
         let agents = Arc::new(std::sync::Mutex::new(watcher));
-        let mut initial_state = HerdrState::default();
-        initial_state.last_accent_fetch_ms = now;
+        let initial_state = HerdrState {
+            last_accent_fetch_ms: now,
+            ..HerdrState::default()
+        };
         let state = Arc::new(RwLock::new(initial_state));
         agents::spawn_background_refresher(&agents, &state);
-        Self {
-            state,
-            agents,
-        }
+        Self { state, agents }
     }
 
     /// Subagentes de `pi` visibles en la instantánea actual, vivos primero,

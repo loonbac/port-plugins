@@ -164,7 +164,9 @@ fn el_acento_no_se_relee_en_cada_render() {
     );
 
     // Esperamos a que pase el TTL y refresque el hilo de fondo
-    std::thread::sleep(std::time::Duration::from_millis(crate::state::ACCENT_TTL_MS + 350));
+    std::thread::sleep(std::time::Duration::from_millis(
+        crate::state::ACCENT_TTL_MS + 350,
+    ));
 
     let c3 = plugin.state.read().unwrap().effective_accent();
     assert_eq!(
@@ -267,7 +269,10 @@ fn el_acento_del_hook_no_relee_el_disco() {
     std::env::set_var("HOME", &temp_home);
 
     let plugin = HerdrPlugin::default();
-    assert_eq!(plugin.state.read().unwrap().effective_accent(), Rgb::new(0x11, 0x22, 0x33));
+    assert_eq!(
+        plugin.state.read().unwrap().effective_accent(),
+        Rgb::new(0x11, 0x22, 0x33)
+    );
 
     // Cambiamos o borramos el archivo en disco
     std::fs::write(&accent_file, "#445566\n").expect("escribir nuevo acento");
@@ -284,7 +289,9 @@ fn el_acento_del_hook_no_relee_el_disco() {
     }
 
     // Tras vencer el TTL y refrescar el hilo en segundo plano, el nuevo acento debe publicarse
-    std::thread::sleep(std::time::Duration::from_millis(crate::state::ACCENT_TTL_MS + 350));
+    std::thread::sleep(std::time::Duration::from_millis(
+        crate::state::ACCENT_TTL_MS + 350,
+    ));
     let refreshed_val = plugin.state.read().unwrap().effective_accent();
     assert_eq!(
         refreshed_val,
@@ -335,7 +342,10 @@ fn la_rama_del_hook_no_relee_el_disco() {
     {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
-    assert_eq!(plugin.state.read().unwrap().spaces[0].branch, "feature-async");
+    assert_eq!(
+        plugin.state.read().unwrap().spaces[0].branch,
+        "feature-async"
+    );
 
     // Borramos .git por completo
     std::fs::remove_dir_all(&git_dir).expect("borrar .git");
@@ -362,9 +372,21 @@ fn la_rama_del_hook_no_relee_el_disco() {
 
 #[test]
 fn herdr_space_updates_name_and_branch_from_cwd() {
+    let repo_dir = std::env::temp_dir().join(format!(
+        "herdr-git-cwd-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_dir_all(&repo_dir);
+    let git_dir = repo_dir.join(".git");
+    std::fs::create_dir_all(&git_dir).expect("crear .git");
+    std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/master\n").expect("escribir HEAD");
+
     let plugin = HerdrPlugin::default();
-    let path = std::path::Path::new("/home/loonbac/Proyectos/port");
-    plugin.update_session_cwd(0, path, "port");
+    plugin.update_session_cwd(0, &repo_dir, "port");
 
     let start = std::time::Instant::now();
     while plugin.state.read().unwrap().spaces[0].branch != "master"
@@ -376,6 +398,8 @@ fn herdr_space_updates_name_and_branch_from_cwd() {
     let s = plugin.state.read().unwrap();
     assert_eq!(s.spaces[0].name, "port");
     assert_eq!(s.spaces[0].branch, "master");
+
+    let _ = std::fs::remove_dir_all(&repo_dir);
 }
 
 #[test]
@@ -1216,7 +1240,8 @@ fn cerrar_una_pestana_pendiente_no_deja_su_shell_en_otra_pestana() {
         "la petición de la pestaña cerrada no debe sobrevivir"
     );
     assert_eq!(
-        plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 0,
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        0,
         "el terminal preexistente conserva su sesión"
     );
 
@@ -1318,7 +1343,10 @@ fn el_visor_no_restaura_una_sesion_que_ya_se_cerro() {
         tab.session_id, 0,
         "una sesión ya cerrada no puede volver a la pestaña"
     );
-    assert_eq!(tab.session_id, PENDING_SESSION, "la pestaña queda pendiente");
+    assert_eq!(
+        tab.session_id, PENDING_SESSION,
+        "la pestaña queda pendiente"
+    );
     drop(s);
 
     assert!(
@@ -1327,7 +1355,8 @@ fn el_visor_no_restaura_una_sesion_que_ya_se_cerro() {
     );
     plugin.on_session_created(8);
     assert_eq!(
-        plugin.state.read().unwrap().spaces[0].tabs[0].session_id, 8,
+        plugin.state.read().unwrap().spaces[0].tabs[0].session_id,
+        8,
         "el shell fresco llega a la pestaña restaurada"
     );
 }
@@ -1398,7 +1427,10 @@ fn un_spawn_fallido_no_desvia_la_siguiente_sesion_a_otra_pestana() {
     plugin.on_session_created(9);
     {
         let s = plugin.state.read().unwrap();
-        assert_eq!(s.spaces[0].tabs[0].session_id, 0, "la terminal base no se toca");
+        assert_eq!(
+            s.spaces[0].tabs[0].session_id, 0,
+            "la terminal base no se toca"
+        );
         assert_eq!(
             s.spaces[0].tabs[1].session_id, 9,
             "la sesión cae en la pestaña que la pidió"
@@ -1471,7 +1503,10 @@ fn el_visor_espera_a_que_resuelva_el_shell_en_vuelo() {
     plugin.on_session_created(6);
 
     let s = plugin.state.read().unwrap();
-    assert_eq!(s.spaces[0].tabs[1].session_id, 5, "el shell va a la pestaña nueva");
+    assert_eq!(
+        s.spaces[0].tabs[1].session_id, 5,
+        "el shell va a la pestaña nueva"
+    );
     assert_eq!(
         s.spaces[0].tabs[0].session_id, 6,
         "el visor ocupa la pestaña del clic"
@@ -1508,8 +1543,14 @@ fn una_configuracion_con_varios_espacios_no_inventa_sesiones() {
 
     let s = plugin.state.read().unwrap();
     assert_eq!(s.spaces[0].tabs[0].session_id, 0);
-    assert_eq!(s.spaces[1].tabs[0].session_id, 1, "la sesión 1 va al segundo espacio");
-    assert_eq!(s.spaces[2].tabs[0].session_id, 2, "la sesión 2 va al tercero");
+    assert_eq!(
+        s.spaces[1].tabs[0].session_id, 1,
+        "la sesión 1 va al segundo espacio"
+    );
+    assert_eq!(
+        s.spaces[2].tabs[0].session_id, 2,
+        "la sesión 2 va al tercero"
+    );
 }
 
 #[test]
@@ -1742,7 +1783,11 @@ fn una_sesion_que_herdr_no_pidio_no_toca_sus_pestanas() {
         let s = plugin.state.read().unwrap();
         s.spaces
             .iter()
-            .flat_map(|sp| sp.tabs.iter().map(|t| (t.session_id, t.title.clone(), t.title_locked)))
+            .flat_map(|sp| {
+                sp.tabs
+                    .iter()
+                    .map(|t| (t.session_id, t.title.clone(), t.title_locked))
+            })
             .collect::<Vec<_>>()
     };
 
@@ -1752,7 +1797,11 @@ fn una_sesion_que_herdr_no_pidio_no_toca_sus_pestanas() {
         let s = plugin.state.read().unwrap();
         s.spaces
             .iter()
-            .flat_map(|sp| sp.tabs.iter().map(|t| (t.session_id, t.title.clone(), t.title_locked)))
+            .flat_map(|sp| {
+                sp.tabs
+                    .iter()
+                    .map(|t| (t.session_id, t.title.clone(), t.title_locked))
+            })
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -2003,8 +2052,16 @@ fn un_clic_en_otra_pestana_mientras_el_visor_esta_en_vuelo_no_pisa_la_peticion()
     plugin.on_session_closed(7);
 
     let s = plugin.state.read().unwrap();
-    let tab1 = s.spaces[0].tabs.iter().find(|t| t.id == 1).expect("pestaña 1");
-    let tab2 = s.spaces[0].tabs.iter().find(|t| t.id == 2).expect("pestaña 2");
+    let tab1 = s.spaces[0]
+        .tabs
+        .iter()
+        .find(|t| t.id == 1)
+        .expect("pestaña 1");
+    let tab2 = s.spaces[0]
+        .tabs
+        .iter()
+        .find(|t| t.id == 2)
+        .expect("pestaña 2");
     assert_eq!(tab1.session_id, 0, "la pestaña 1 vuelve a su terminal");
     assert_eq!(tab2.session_id, 5, "la pestaña 2 no se toca");
 }
@@ -2098,7 +2155,10 @@ fn salir_de_un_visor_sin_terminal_pide_un_shell() {
     {
         let s = plugin.state.read().unwrap();
         let tab = s.spaces[0].tabs.iter().find(|t| t.id == 2).unwrap();
-        assert_eq!(tab.session_id, PENDING_SESSION, "sin terminal al que volver");
+        assert_eq!(
+            tab.session_id, PENDING_SESSION,
+            "sin terminal al que volver"
+        );
         assert!(tab.watching.is_none());
     }
     assert!(plugin.take_new_session_request(), "pide un shell fresco");
@@ -2143,4 +2203,162 @@ fn la_pestana_que_salio_del_visor_se_puede_cerrar() {
         "cierra su terminal real, no el visor muerto"
     );
     assert_eq!(plugin.state.read().unwrap().spaces[0].tabs.len(), 1);
+}
+
+#[test]
+fn agregacion_estado_agente_prioridad_exacta_y_vacio() {
+    use crate::state::aggregate_agent_state;
+    use port_plugin_api::AgentState;
+
+    // Sin estados devuelve None
+    let vacio: [(AgentState, bool); 0] = [];
+    assert_eq!(aggregate_agent_state(vacio.iter()), None);
+
+    // Unknown es prioridad 0
+    let unknown = [(AgentState::Unknown, false)];
+    assert_eq!(
+        aggregate_agent_state(unknown.iter()),
+        Some((AgentState::Unknown, false))
+    );
+
+    // Idle visto (1) > Unknown (0)
+    let idle_visto = [(AgentState::Unknown, false), (AgentState::Idle, true)];
+    assert_eq!(
+        aggregate_agent_state(idle_visto.iter()),
+        Some((AgentState::Idle, true))
+    );
+
+    // Working (2) > Idle visto (1)
+    let working = [(AgentState::Idle, true), (AgentState::Working, true)];
+    assert_eq!(
+        aggregate_agent_state(working.iter()),
+        Some((AgentState::Working, true))
+    );
+
+    // Idle sin ver (3) > Working (2)
+    let idle_sin_ver = [(AgentState::Working, false), (AgentState::Idle, false)];
+    assert_eq!(
+        aggregate_agent_state(idle_sin_ver.iter()),
+        Some((AgentState::Idle, false))
+    );
+
+    // Blocked (4) > Idle sin ver (3)
+    let blocked = [(AgentState::Idle, false), (AgentState::Blocked, true)];
+    assert_eq!(
+        aggregate_agent_state(blocked.iter()),
+        Some((AgentState::Blocked, true))
+    );
+
+    // Blocked sin ver vs Blocked visto: prefiere el que no se ha visto
+    let blocked_desempate = [(AgentState::Blocked, true), (AgentState::Blocked, false)];
+    assert_eq!(
+        aggregate_agent_state(blocked_desempate.iter()),
+        Some((AgentState::Blocked, false))
+    );
+}
+
+#[test]
+fn update_session_agent_guarda_y_on_session_closed_borra() {
+    use port_plugin_api::{AgentState, SpaceHook};
+
+    let plugin = HerdrPlugin::default();
+
+    // Inicialmente vacío
+    assert!(plugin.state.read().unwrap().agents.is_empty());
+
+    // update_session_agent guarda bajo el RwLock
+    plugin.update_session_agent(42, AgentState::Working, true);
+    assert_eq!(
+        plugin.state.read().unwrap().agents.get(&42),
+        Some(&(AgentState::Working, true))
+    );
+
+    // Actualiza a Blocked sin ver
+    plugin.update_session_agent(42, AgentState::Blocked, false);
+    assert_eq!(
+        plugin.state.read().unwrap().agents.get(&42),
+        Some(&(AgentState::Blocked, false))
+    );
+
+    // on_session_closed elimina la entrada
+    plugin.on_session_closed(42);
+    assert_eq!(plugin.state.read().unwrap().agents.get(&42), None);
+}
+
+#[test]
+fn clic_en_espacio_con_atencion_selecciona_pestana_que_la_requiere() {
+    use port_plugin_api::AgentState;
+
+    let plugin = HerdrPlugin::default();
+
+    // Configuramos el espacio 0 con 4 pestañas:
+    // Tab 0: sesión 10 (sin agente o Working)
+    // Tab 1: sesión 20 (Idle sin ver)
+    // Tab 2: sesión 30 (Blocked sin ver)
+    // Tab 3: sesión 40 (Blocked visto)
+    {
+        let mut s = plugin.state.write().unwrap();
+        s.spaces[0].tabs = vec![
+            HerdrTab {
+                id: 1,
+                title: "term 1".to_string(),
+                session_id: 10,
+                app: None,
+                title_locked: false,
+                watching: None,
+            },
+            HerdrTab {
+                id: 2,
+                title: "term 2".to_string(),
+                session_id: 20,
+                app: None,
+                title_locked: false,
+                watching: None,
+            },
+            HerdrTab {
+                id: 3,
+                title: "term 3".to_string(),
+                session_id: 30,
+                app: None,
+                title_locked: false,
+                watching: None,
+            },
+            HerdrTab {
+                id: 4,
+                title: "term 4".to_string(),
+                session_id: 40,
+                app: None,
+                title_locked: false,
+                watching: None,
+            },
+        ];
+        s.spaces[0].active_tab_index = 0;
+
+        s.agents.insert(10, (AgentState::Working, false));
+        s.agents.insert(20, (AgentState::Idle, false));
+        s.agents.insert(30, (AgentState::Blocked, false));
+        s.agents.insert(40, (AgentState::Blocked, true));
+
+        // Al seleccionar con atención: primero Blocked (pestaña índice 2)
+        s.select_space_with_attention(0);
+        assert_eq!(s.spaces[0].active_tab_index, 2);
+
+        // Si la pestaña 2 pasa a Working, la primera con Blocked es la 3
+        s.agents.insert(30, (AgentState::Working, false));
+        s.spaces[0].active_tab_index = 0;
+        s.select_space_with_attention(0);
+        assert_eq!(s.spaces[0].active_tab_index, 3);
+
+        // Si no hay Blocked, pasa a la primera con Idle sin ver (pestaña índice 1)
+        s.agents.insert(40, (AgentState::Working, false));
+        s.spaces[0].active_tab_index = 0;
+        s.select_space_with_attention(0);
+        assert_eq!(s.spaces[0].active_tab_index, 1);
+
+        // Si no hay atención (Idle ya visto), conserva la pestaña activa existente (0)
+        s.agents.insert(20, (AgentState::Idle, true));
+        s.spaces[0].active_tab_index = 0;
+        s.select_space_with_attention(0);
+        assert_eq!(s.spaces[0].active_tab_index, 0);
+    }
 }

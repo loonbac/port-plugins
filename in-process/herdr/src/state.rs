@@ -6,6 +6,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
+use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 use port_term_core::pty::RunningApp;
 
@@ -99,6 +100,47 @@ impl HerdrSpace {
         } else if self.active_tab_index >= self.tabs.len() {
             self.active_tab_index = self.tabs.len() - 1;
         }
+    }
+
+    /// Devuelve el índice de la pestaña que requiere atención en este espacio:
+    /// primero la primera con `Blocked`, y si no hay, la primera con `Idle` sin ver.
+    /// Ignora pestañas pendientes y pestañas ocupadas por el visor.
+    pub(crate) fn attention_tab_index(
+        &self,
+        agents: &HashMap<usize, (AgentState, bool)>,
+    ) -> Option<usize> {
+        let candidate_tabs = self.tabs.iter().enumerate().filter(|(_, tab)| {
+            tab.session_id != PENDING_SESSION && tab.viewer_session_id().is_none()
+        });
+
+        // 1. Primera pestaña con Blocked
+        for (idx, tab) in candidate_tabs.clone() {
+            if let Some((AgentState::Blocked, _)) = agents.get(&tab.session_id) {
+                return Some(idx);
+            }
+        }
+
+        // 2. Si no hay, primera pestaña con Idle sin ver
+        for (idx, tab) in candidate_tabs {
+            if let Some((AgentState::Idle, false)) = agents.get(&tab.session_id) {
+                return Some(idx);
+            }
+        }
+
+        None
+    }
+
+    /// Estado agregado de agente para este espacio a partir del mapa de sesiones.
+    pub(crate) fn aggregated_agent_state(
+        &self,
+        agents: &HashMap<usize, (AgentState, bool)>,
+    ) -> Option<(AgentState, bool)> {
+        let states = self
+            .tabs
+            .iter()
+            .filter(|t| t.session_id != PENDING_SESSION && t.viewer_session_id().is_none())
+            .filter_map(|t| agents.get(&t.session_id));
+        aggregate_agent_state(states)
     }
 }
 
@@ -197,6 +239,8 @@ pub struct HerdrState {
     pub(crate) session_cwds: HashMap<usize, PathBuf>,
     /// Caché de la rama git por directorio de trabajo: `(rama, timestamp_ms)`.
     pub(crate) git_branch_cache: HashMap<PathBuf, (String, u64)>,
+    /// Estado de agente por sesión con su marca de visto: `(AgentState, seen)`.
+    pub(crate) agents: HashMap<usize, (AgentState, bool)>,
 }
 
 /// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
@@ -409,6 +453,23 @@ impl HerdrState {
         self.pending_shell_tabs.push_back(tab_id);
         Some(tab_id)
     }
+
+    /// Selecciona el espacio indicado. Si el espacio tiene atención (alguna pestaña
+    /// con `Blocked` o con `Idle` sin ver), selecciona además la primera pestaña que
+    /// la requiere (primero `Blocked`, luego `Idle` sin ver). Si no hay atención,
+    /// conserva la pestaña activa actual del espacio.
+    pub(crate) fn select_space_with_attention(&mut self, space_index: usize) {
+        let attention_tab_idx = self
+            .spaces
+            .get(space_index)
+            .and_then(|space| space.attention_tab_index(&self.agents));
+        self.active_space_index = space_index;
+        if let Some(tab_idx) = attention_tab_idx {
+            if let Some(space) = self.spaces.get_mut(space_index) {
+                space.active_tab_index = tab_idx;
+            }
+        }
+    }
 }
 
 impl Default for HerdrState {
@@ -451,6 +512,28 @@ impl Default for HerdrState {
             last_accent_fetch_ms: crate::agents::now_ms(),
             session_cwds: HashMap::new(),
             git_branch_cache: HashMap::new(),
+            agents: HashMap::new(),
         }
     }
+}
+
+fn agent_state_priority(state: AgentState, seen: bool) -> (u8, bool) {
+    let p = match (state, seen) {
+        (AgentState::Blocked, _) => 4,
+        (AgentState::Idle, false) => 3,
+        (AgentState::Working, _) => 2,
+        (AgentState::Idle, true) => 1,
+        (AgentState::Unknown, _) => 0,
+    };
+    (p, !seen)
+}
+
+/// Estado agregado de un espacio según la prioridad de herdr:
+/// Blocked (4) > Idle sin ver (3) > Working (2) > Idle visto (1) > Unknown (0).
+pub(crate) fn aggregate_agent_state<'a>(
+    states: impl Iterator<Item = &'a (AgentState, bool)>,
+) -> Option<(AgentState, bool)> {
+    states
+        .max_by_key(|(state, seen)| agent_state_priority(*state, *seen))
+        .copied()
 }
