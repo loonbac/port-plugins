@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::bridge::Bridge;
 use crate::http::{self, Route, MAX_REQUEST_BYTES};
+use crate::socket::ViewProvider;
 
 /// Dónde escucha el servidor y qué sirve.
 #[derive(Debug, Clone)]
@@ -64,6 +65,7 @@ pub fn serve(
     listener: TcpListener,
     config: ServerConfig,
     bridge: Arc<Bridge>,
+    view: ViewProvider,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("port-mobile".to_string())
@@ -74,12 +76,13 @@ pub fn serve(
                 };
                 let config = config.clone();
                 let bridge = Arc::clone(&bridge);
+                let view = Arc::clone(&view);
                 // Un hilo por cliente: son pocos y locales, y así una lectura
                 // lenta no frena al resto.
                 let _ = thread::Builder::new()
                     .name("port-mobile-client".to_string())
                     .spawn(move || {
-                        let _ = handle_connection(stream, &config, &bridge);
+                        let _ = handle_connection(stream, &config, &bridge, &view);
                     });
             }
         })
@@ -89,9 +92,10 @@ pub fn serve(
 pub fn spawn(
     config: ServerConfig,
     bridge: Arc<Bridge>,
+    view: ViewProvider,
 ) -> std::io::Result<(SocketAddr, JoinHandle<()>)> {
     let (listener, address) = bind(&config)?;
-    let handle = serve(listener, config, bridge)?;
+    let handle = serve(listener, config, bridge, view)?;
     Ok((address, handle))
 }
 
@@ -99,7 +103,8 @@ pub fn spawn(
 pub fn handle_connection(
     mut stream: TcpStream,
     config: &ServerConfig,
-    _bridge: &Arc<Bridge>,
+    bridge: &Arc<Bridge>,
+    view: &ViewProvider,
 ) -> std::io::Result<()> {
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     let mut raw = Vec::new();
@@ -118,12 +123,11 @@ pub fn handle_connection(
 
     let body = match http::parse_request(&raw) {
         Some(request) => match http::route(&request, &config.token) {
+            // El apretón de manos del socket lo escribe la propia biblioteca: acá
+            // no se responde nada, se le entrega la conexión al bucle.
+            Route::Upgrade => return crate::socket::serve_socket(stream, bridge, view()),
             Route::Asset(path) => serve_asset(&config.assets, &path),
             Route::Unauthorized => http::response(401, "text/plain", b"token requerido"),
-            // El bucle del socket entra en la rebanada siguiente; hasta entonces
-            // el cambio de protocolo se declara no implementado en vez de
-            // fingir que se acepta.
-            Route::Upgrade => http::response(501, "text/plain", b"socket todavia no disponible"),
             Route::NotFound => http::response(404, "text/plain", b"no encontrado"),
         },
         // Una petición ilegible no se responde con un error del protocolo: no se
@@ -148,6 +152,8 @@ fn serve_asset(root: &std::path::Path, path: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::Layout;
+    use crate::socket::InitialView;
     use std::io::BufRead;
 
     /// Directorio temporal con una PWA mínima.
@@ -175,12 +181,23 @@ mod tests {
         respuesta
     }
 
+    /// Vista inicial de las pruebas: sin espacios, mirando la sesión 7.
+    fn vista() -> ViewProvider {
+        Arc::new(|| InitialView {
+            layout: Layout {
+                spaces: Vec::new(),
+                active_space: 0,
+            },
+            session: 7,
+        })
+    }
+
     /// Pone el servidor a escuchar en un puerto efímero.
     fn servidor(tag: &str, token: &str) -> (SocketAddr, PathBuf) {
         let assets = pwa_de_prueba(tag);
         let mut config = ServerConfig::new(token.to_string(), assets.clone());
         config.bind = "127.0.0.1:0".to_string();
-        let (address, _handle) = spawn(config, Arc::new(Bridge::new())).expect("servidor");
+        let (address, _handle) = spawn(config, Arc::new(Bridge::new()), vista()).expect("servidor");
         (address, assets)
     }
 
@@ -215,10 +232,12 @@ mod tests {
                 .starts_with("HTTP/1.1 401"),
             "con un token equivocado debía negarse"
         );
-        // Con el token correcto todavía no hay bucle del socket, pero la
-        // autenticación ya pasa: no es 401.
+        // Con el token correcto la autenticación pasa y la conexión se entrega
+        // al bucle del socket. Un `GET` sin las cabeceras del protocolo no puede
+        // completar el apretón de manos, así que no hay respuesta: lo que se
+        // comprueba es que ya no es un rechazo por token.
         let con_token = pedir(address, "GET /ws?token=secreto HTTP/1.1\r\nHost: x\r\n\r\n");
-        assert!(con_token.starts_with("HTTP/1.1 501"), "{con_token}");
+        assert!(!con_token.starts_with("HTTP/1.1 401"), "{con_token}");
         let _ = std::fs::remove_dir_all(&assets);
     }
 

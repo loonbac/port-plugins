@@ -13,4 +13,7 @@ path = "src/lib.rs"
 port-term-core.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { workspace = true }
-tungstenite = { version = "0.30.0", default-features = false }
+# Sólo el protocolo, sin TLS: la única superficie es localhost y el TLS lo pone
+# `tailscale serve`. La feature `handshake` es la que trae `accept` y el apretón
+# de manos completo; sin ella no hay servidor de WebSocket.
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
