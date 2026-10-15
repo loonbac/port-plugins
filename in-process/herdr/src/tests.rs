@@ -5,6 +5,7 @@
 
 use std::path::Path;
 
+use port_plugin_api::AgentState;
 use port_plugin_api::KeyAction;
 use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
@@ -2868,5 +2869,58 @@ fn la_pestana_con_cwd_tambien_lleva_el_entorno() {
             .any(|(clave, _)| clave == "HERDR_SOCKET_PATH"),
         "la pestaña con cwd no anunció su panel: {:?}",
         config.env
+    );
+}
+
+/// Un informe del panel manda sobre la heurística del núcleo mientras vive.
+///
+/// Sin esta precedencia el sondeo del núcleo pisaría la señal exacta con su
+/// deducción, y la barra volvería a decir «working» justo cuando el agente
+/// espera respuesta: el síntoma que se está corrigiendo.
+#[test]
+fn el_informe_del_panel_manda_sobre_la_heuristica() {
+    let presence = empty_presence("precedencia");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    plugin.state.write().unwrap().panel_reports.bind("p1", 7);
+
+    let informe = |seq: u64, ttl_ms: u64| {
+        format!(
+            "{{\"id\":\"cli:request\",\"method\":\"pane.report_metadata\",\"params\":{{\"pane_id\":\"p1\",\"source\":\"port:state\",\"tokens\":{{\"port_state\":\"blocked\"}},\"seq\":{seq},\"ttl_ms\":{ttl_ms}}}}}"
+        )
+    };
+    let aplicar = |linea: &str, ahora: u64| {
+        let request = crate::report::parse_request(linea).expect("informe válido");
+        plugin
+            .state
+            .write()
+            .unwrap()
+            .apply_panel_report(&request, ahora)
+            .expect("aplicar informe");
+    };
+
+    // Anclado al reloj real: así el vencimiento cae en el futuro y la prueba no
+    // depende de una hora concreta.
+    let ahora = crate::agents::now_ms();
+    aplicar(&informe(1, 30_000), ahora);
+    assert_eq!(
+        plugin.state.read().unwrap().agents.get(&7),
+        Some(&(AgentState::Blocked, false))
+    );
+
+    // La heurística del núcleo no lo pisa mientras el informe está vivo.
+    plugin.update_session_agent(7, AgentState::Working, true);
+    assert_eq!(
+        plugin.state.read().unwrap().agents.get(&7),
+        Some(&(AgentState::Blocked, false)),
+        "la heurística pisó el informe del panel"
+    );
+
+    // Un informe ya vencido sí deja mandar al núcleo: la precedencia es
+    // temporal, no permanente.
+    aplicar(&informe(2, 1), ahora - 60_000);
+    plugin.update_session_agent(7, AgentState::Working, true);
+    assert_eq!(
+        plugin.state.read().unwrap().agents.get(&7),
+        Some(&(AgentState::Working, true))
     );
 }

@@ -240,6 +240,12 @@ impl InFlight {
 /// Tope de tokens vigentes por panel, copiado del contrato de herdr (C11).
 pub(crate) const MAX_PANEL_TOKENS: usize = 32;
 
+/// Vida que se le supone al estado de un informe que no declara `ttl_ms`.
+///
+/// Basta para que un informe sin vida explícita siga mandando un rato en vez de
+/// caducar en el mismo instante en que llegó.
+pub(crate) const REPORT_GRACE_MS: u64 = 10_000;
+
 /// Token declarado por un panel, con su vencimiento.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PanelToken {
@@ -261,6 +267,13 @@ pub(crate) struct PanelReports {
     tokens: BTreeMap<String, BTreeMap<String, PanelToken>>,
     /// Panel -> sesión, enlazado cuando el núcleo crea la sesión.
     panes: BTreeMap<String, usize>,
+    /// Sesiones cuyo estado vino de un informe, con su vencimiento.
+    ///
+    /// Mientras siga vivo, el informe manda: es una señal exacta de la
+    /// aplicación y no una deducción, así que el sondeo del núcleo no puede
+    /// pisarla. Sin esto la barra volvería a decir «working» justo cuando el
+    /// agente está esperando respuesta, que es el síntoma que se está corrigiendo.
+    reported: BTreeMap<usize, u64>,
 }
 
 /// Qué pasó al aplicar un informe.
@@ -281,6 +294,20 @@ impl PanelReports {
     /// Sesión de un panel, si está enlazado.
     pub(crate) fn session(&self, pane_id: &str) -> Option<usize> {
         self.panes.get(pane_id).copied()
+    }
+
+    /// Marca que el estado de una sesión vino de un informe, hasta `deadline_ms`.
+    fn mark_reported(&mut self, session_id: usize, deadline_ms: u64) {
+        self.reported.insert(session_id, deadline_ms);
+    }
+
+    /// `true` si el estado de la sesión viene de un informe todavía vigente.
+    ///
+    /// Descarta de paso los vencidos, así que el mapa no crece con sesiones que
+    /// ya nadie reporta.
+    pub(crate) fn panel_state_live(&mut self, session_id: usize, now_ms: u64) -> bool {
+        self.reported.retain(|_, deadline| *deadline > now_ms);
+        self.reported.contains_key(&session_id)
     }
 
     /// Tokens vigentes de un panel.
@@ -926,6 +953,11 @@ impl HerdrState {
 
         if let Some(state) = request.agent_state() {
             self.agents.insert(session, (state, report_seen(state)));
+            let deadline = request
+                .ttl_ms
+                .map(|ttl| now_ms.saturating_add(ttl))
+                .unwrap_or_else(|| now_ms.saturating_add(REPORT_GRACE_MS));
+            self.panel_reports.mark_reported(session, deadline);
         }
 
         Ok(PanelOutcome::Applied)

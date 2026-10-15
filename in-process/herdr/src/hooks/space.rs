@@ -222,6 +222,14 @@ impl SpaceHook for HerdrPlugin {
 
     fn update_session_agent(&self, session_id: usize, state: AgentState, seen: bool) {
         let mut s = self.state.write().unwrap();
+        // Un informe del panel es una señal exacta y manda mientras esté vivo:
+        // si la heurística del núcleo la pisara, la barra volvería a decir
+        // «working» justo cuando el agente espera respuesta.
+        if s.panel_reports
+            .panel_state_live(session_id, crate::agents::now_ms())
+        {
+            return;
+        }
         s.agents.insert(session_id, (state, seen));
     }
 
