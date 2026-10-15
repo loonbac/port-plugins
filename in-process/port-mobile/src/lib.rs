@@ -9,6 +9,7 @@
 
 pub mod bridge;
 pub mod http;
+pub mod plugin;
 pub mod protocol;
 pub mod server;
 pub mod socket;
