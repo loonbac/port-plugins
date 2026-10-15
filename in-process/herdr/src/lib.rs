@@ -120,10 +120,50 @@ fn resolve_panel_bin() -> PathBuf {
     PathBuf::from(PANEL_BIN_NAME)
 }
 
+/// Ruta que se deriva cuando el entorno no declara dónde escuchar.
+///
+/// El directorio de sesión del usuario es el lugar correcto para un socket de
+/// sesión: es por usuario, ya trae permisos restrictivos y el sistema lo limpia
+/// al cerrar la sesión. Sin ese directorio no se publica nada, en vez de
+/// inventar una ruta en un temporal compartido entre usuarios.
+fn default_panel_socket_path() -> Option<PathBuf> {
+    default_panel_socket_in(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+}
+
+/// La derivación anterior con el directorio de sesión inyectado.
+///
+/// Separada para poder probarla sin depender del entorno del proceso.
+fn default_panel_socket_in(runtime_dir: Option<PathBuf>) -> Option<PathBuf> {
+    let runtime_dir = runtime_dir?;
+    if runtime_dir.as_os_str().is_empty() {
+        return None;
+    }
+    Some(runtime_dir.join("port").join("herdr.sock"))
+}
+
 impl HerdrPlugin {
     /// Crea una nueva instancia del plugin Herdr con valores por defecto.
+    ///
+    /// Publica la superficie de intercepción sin que nadie tenga que
+    /// configurarla: de eso depende que la aplicación que corre dentro pueda
+    /// reportar. Donde el entorno declare una ruta, se respeta esa.
     pub fn new() -> Self {
-        Self::with_presence_dir(presence::default_presence_dir())
+        Self::with_presence_dir(presence::default_presence_dir()).with_default_panel_socket()
+    }
+
+    /// Publica la superficie en la ruta por defecto si el entorno no declaró una.
+    ///
+    /// Vive aparte del constructor a propósito: las pruebas construyen el plugin
+    /// sin abrir sockets, y sólo la entrada de producción publica la superficie.
+    pub fn with_default_panel_socket(self) -> Self {
+        {
+            let mut state = self.state.write().unwrap();
+            if state.panel_env.socket.is_none() {
+                state.panel_env.socket = default_panel_socket_path();
+            }
+        }
+        spawn_panel_socket(&self.state);
+        self
     }
 
     /// Igual que `new`, pero apuntando a otro directorio de presencia.

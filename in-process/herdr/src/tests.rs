@@ -2872,6 +2872,21 @@ fn la_pestana_con_cwd_tambien_lleva_el_entorno() {
     );
 }
 
+/// La ruta por defecto del socket se deriva del directorio de sesión.
+///
+/// Es lo que hace que la intercepción funcione sin configurar nada: si nadie
+/// declara dónde escuchar, el plugin publica en el lugar estándar de la sesión.
+#[test]
+fn la_ruta_por_defecto_sale_del_directorio_de_sesion() {
+    assert_eq!(
+        crate::default_panel_socket_in(Some(PathBuf::from("/run/user/1000"))),
+        Some(PathBuf::from("/run/user/1000/port/herdr.sock"))
+    );
+    // Sin directorio de sesión no se inventa una ruta en un temporal compartido.
+    assert_eq!(crate::default_panel_socket_in(None), None);
+    assert_eq!(crate::default_panel_socket_in(Some(PathBuf::new())), None);
+}
+
 /// Un informe del panel manda sobre la heurística del núcleo mientras vive.
 ///
 /// Sin esta precedencia el sondeo del núcleo pisaría la señal exacta con su
