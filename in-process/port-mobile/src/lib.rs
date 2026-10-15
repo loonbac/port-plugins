@@ -7,4 +7,5 @@
 //! escribir en una sesión es genérica, y el modelo de espacios lo publica como
 //! servicio el plugin que ya lo tiene, en vez de duplicarlo acá.
 
+pub mod http;
 pub mod protocol;

@@ -3937,13 +3937,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5da3b0203fd7ee5720aa0b5e790b591aa5d3f41c3ed2c34a3a393382198af2f7"
 
 [[package]]
-name = "port-herdr"
-version = "0.1.0"
-dependencies = [
- "serde_json",
-]
-
-[[package]]
 name = "port-plugin-api"
 version = "0.1.10"
 dependencies = [
@@ -3986,6 +3979,15 @@ dependencies = [
  "port-plugin-api",
  "port-term-core",
  "serde_json",
+]
+
+[[package]]
+name = "port-plugin-mobile"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tungstenite",
 ]
 
 [[package]]
@@ -5975,6 +5977,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
 dependencies = [
  "core_maths",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e48ac77174b19c110a50ab2128b24215ac9cb40e0e12e093fb602d175c569d22"
+dependencies = [
+ "bytes",
+ "log",
+ "rand 0.10.3",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
