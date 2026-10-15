@@ -198,5 +198,8 @@ pub fn watch_command(
             agent_label.to_string(),
         ],
         cwd: None,
+        // El visor no publica entorno de panel: ahí no corre un agente que lo
+        // vaya a leer, sólo el visor del subagente.
+        env: Vec::new(),
     }
 }
