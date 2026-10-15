@@ -29,6 +29,13 @@ pub enum ServerMessage {
         rows: usize,
         /// Ancho total, en columnas.
         columns: usize,
+        /// Dónde está el cursor, si está visible.
+        ///
+        /// Va en su propio campo y no dentro de las filas porque el cursor se
+        /// mueve sin que ninguna fila cambie: si viajara con ellas, escribir una
+        /// letra obligaría a mandar la fila entera.
+        #[serde(default)]
+        cursor: Option<CursorView>,
         /// Sólo las filas que cambiaron, con su índice.
         changed: Vec<RowUpdate>,
     },
@@ -70,6 +77,17 @@ pub enum ClientMessage {
         /// Sesión que este cliente quiere mirar.
         session: usize,
     },
+}
+
+/// Dónde está el cursor dentro de la rejilla.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CursorView {
+    /// Fila del cursor.
+    pub row: usize,
+    /// Columna del cursor.
+    pub column: usize,
+    /// Si está visible; un programa puede esconderlo.
+    pub visible: bool,
 }
 
 /// Una fila de la rejilla, tal como viaja por el cable.
@@ -266,10 +284,19 @@ mod tests {
             session: 7,
             rows: 24,
             columns: 80,
+            cursor: Some(CursorView {
+                row: 3,
+                column: 9,
+                visible: true,
+            }),
             changed: vec![fila(1, "hola")],
         };
         let json = serde_json::to_string(&frame).expect("serializar");
         assert!(json.contains("\"type\":\"frame\""), "{json}");
+        assert!(
+            json.contains("\"column\":9"),
+            "el cursor debe viajar: {json}"
+        );
         assert_eq!(
             serde_json::from_str::<ServerMessage>(&json).expect("deserializar"),
             frame

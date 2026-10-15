@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use port_term_core::session::GridSize;
 
-use crate::protocol::{changed_slice, ClientMessage, Layout, RowUpdate, ServerMessage};
+use crate::protocol::{changed_slice, ClientMessage, CursorView, Layout, RowUpdate, ServerMessage};
 
 /// Salida de un cliente: por dónde le llegan los mensajes.
 pub type ClientSink = Sender<ServerMessage>;
@@ -48,6 +48,8 @@ struct Shared {
     rows: BTreeMap<usize, Vec<RowUpdate>>,
     /// Ancho de la última rejilla publicada de cada sesión.
     columns: BTreeMap<usize, usize>,
+    /// Dónde está el cursor de cada sesión, para no mandarlo con las filas.
+    cursors: BTreeMap<usize, Option<CursorView>>,
     /// Entrada pendiente de escribir, en orden de llegada.
     input: Vec<(usize, Vec<u8>)>,
     /// Redimensiones pendientes, en orden de llegada.
@@ -89,8 +91,9 @@ impl Bridge {
         // con el primer cuadro que publique el anfitrión.
         let snapshot = shared.rows.get(&focus).cloned();
         let columns = shared.columns.get(&focus).copied().unwrap_or_default();
+        let cursor = shared.cursors.get(&focus).copied().flatten();
         if let Some(rows) = snapshot {
-            let _ = out.send(frame_message(focus, columns, &rows, rows.clone()));
+            let _ = out.send(frame_message(focus, columns, cursor, &rows, rows.clone()));
             if let Some(entry) = shared.clients.get_mut(&id) {
                 entry.needs_full = false;
             }
@@ -135,6 +138,7 @@ impl Bridge {
                 }
                 let snapshot = shared.rows.get(&session).cloned();
                 let columns = shared.columns.get(&session).copied().unwrap_or_default();
+                let cursor = shared.cursors.get(&session).copied().flatten();
                 if let Some(entry) = shared.clients.get_mut(&client) {
                     entry.focus = session;
                     // Al cambiar de sesión hace falta una foto nueva: lo que se
@@ -143,10 +147,13 @@ impl Bridge {
                 }
                 if let Some(rows) = snapshot {
                     if let Some(entry) = shared.clients.get_mut(&client) {
-                        let _ =
-                            entry
-                                .out
-                                .send(frame_message(session, columns, &rows, rows.clone()));
+                        let _ = entry.out.send(frame_message(
+                            session,
+                            columns,
+                            cursor,
+                            &rows,
+                            rows.clone(),
+                        ));
                         entry.needs_full = false;
                     }
                 }
@@ -182,6 +189,7 @@ impl Bridge {
         };
         shared.rows.insert(session, rows.clone());
         shared.columns.insert(session, columns);
+        let cursor = shared.cursors.get(&session).copied().flatten();
         for client in shared.clients.values_mut() {
             if client.focus != session {
                 continue;
@@ -194,7 +202,7 @@ impl Bridge {
             client.needs_full = false;
             let _ = client
                 .out
-                .send(frame_message(session, columns, &rows, payload));
+                .send(frame_message(session, columns, cursor, &rows, payload));
         }
     }
 
@@ -203,6 +211,7 @@ impl Bridge {
         let mut shared = self.lock();
         shared.rows.remove(&session);
         shared.columns.remove(&session);
+        shared.cursors.remove(&session);
         for client in shared.clients.values_mut() {
             // El que la miraba se queda sin nada que mostrar: su pestaña se cerró
             // y el layout que recibirá a continuación ya no la trae.
@@ -210,6 +219,14 @@ impl Bridge {
                 let _ = client.out.send(ServerMessage::Closed { session });
             }
         }
+    }
+
+    /// Publica dónde está el cursor de una sesión.
+    ///
+    /// Va aparte de las filas a propósito: el cursor se mueve sin que ninguna
+    /// fila cambie, así que se anuncia una vez y viaja en cada cuadro.
+    pub fn publish_cursor(&self, session: usize, cursor: Option<CursorView>) {
+        self.lock().cursors.insert(session, cursor);
     }
 
     /// Entrada que los clientes quieren escribir, y que se drena una sola vez.
@@ -245,6 +262,7 @@ impl Bridge {
 fn frame_message(
     session: usize,
     columns: usize,
+    cursor: Option<CursorView>,
     rows: &[RowUpdate],
     changed: Vec<RowUpdate>,
 ) -> ServerMessage {
@@ -252,6 +270,7 @@ fn frame_message(
         session,
         rows: rows.len(),
         columns,
+        cursor,
         changed,
     }
 }

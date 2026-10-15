@@ -16,7 +16,7 @@ use port_term_core::frame::{Frame, Rgb};
 use port_term_core::session::GridSize;
 
 use crate::bridge::Bridge;
-use crate::protocol::{RowUpdate, WireRun};
+use crate::protocol::{CursorView, RowUpdate, WireRun};
 
 /// Plugin que lleva la terminal al teléfono.
 pub struct MobilePlugin {
@@ -56,6 +56,9 @@ impl SpaceHook for MobilePlugin {
     }
 
     fn update_session_frame(&self, session_id: usize, frame: &Frame) {
+        // El cursor va aparte y antes que las filas: se mueve sin que ninguna
+        // fila cambie, y así el cuadro que sigue ya lo lleva.
+        self.bridge.publish_cursor(session_id, wire_cursor(frame));
         self.bridge
             .publish_frame(session_id, frame.columns, wire_rows(frame));
     }
@@ -92,6 +95,15 @@ pub fn wire_rows(frame: &Frame) -> Vec<RowUpdate> {
                 .collect(),
         })
         .collect()
+}
+
+/// Dónde está el cursor del cuadro, si está visible.
+fn wire_cursor(frame: &Frame) -> Option<CursorView> {
+    frame.cursor.as_ref().map(|cursor| CursorView {
+        row: cursor.row,
+        column: cursor.column,
+        visible: cursor.visible,
+    })
 }
 
 /// Color en la forma que viaja por el cable.
