@@ -310,6 +310,7 @@ mod tests {
                     session: 7,
                     agent: AgentView::Unknown,
                     seen: true,
+                    cwd: Some("/home/loonbac/Proyectos/port-plugins".to_string()),
                 }],
             }],
             active_space: 0,

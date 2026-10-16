@@ -146,6 +146,7 @@ mod tests {
                     session: 7,
                     agent: AgentView::Blocked,
                     seen: false,
+                    cwd: None,
                 }],
             }],
             active_space: 0,

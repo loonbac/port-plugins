@@ -167,6 +167,12 @@ pub struct TabView {
     pub agent: AgentView,
     /// Si el usuario ya vio el estado: lo que ya se vio no reclama atención.
     pub seen: bool,
+    /// Carpeta de la sesión, cuando el anfitrión la publicó.
+    ///
+    /// Opcional a propósito: un layout anterior no la trae y el cliente agrupa
+    /// igual, sólo que sin esa pestaña en su proyecto.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// Índices de las filas que cambiaron entre dos cuadros.
@@ -326,6 +332,7 @@ mod tests {
                         session: 7,
                         agent: AgentView::Blocked,
                         seen: false,
+                        cwd: Some("/home/loonbac/Proyectos/port-plugins".to_string()),
                     }],
                 }],
                 active_space: 0,
