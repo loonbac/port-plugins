@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PORT móvil — espejo</title>
+<style>
+  body { margin: 0; background: #111; color: #eee; font: 14px/1.4 system-ui, sans-serif; }
+  #spaces { display: flex; gap: 8px; padding: 8px; overflow-x: auto; }
+  #spaces button { background: #222; color: #eee; border: 1px solid #444; border-radius: 8px; padding: 6px 10px; }
+  #term { padding: 8px; }
+  #term pre { margin: 0; white-space: pre-wrap; word-break: break-all; }
+  #status { padding: 8px; color: #999; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="spaces"></div>
+<div id="term"><pre id="screen"></pre></div>
+<div id="status">conectando…</div>
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var token = params.get("token") || "";
+  var status = document.getElementById("status");
+  var spacesEl = document.getElementById("spaces");
+  var screenEl = document.getElementById("screen");
+  var rows = [];
+  var wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+
+  if (!token) {
+    status.textContent = "falta ?token= — cópialo de ~/.config/port/mobile-token (solo VPN o localhost)";
+    return;
+  }
+
+  var ws = new WebSocket(wsProto + "//" + location.host + "/ws?token=" + encodeURIComponent(token));
+
+  function marker(agent) {
+    if (agent === "working") return "● working";
+    if (agent === "blocked") return "● espera tu respuesta";
+    if (agent === "idle") return "✓ listo";
+    return "";
+  }
+
+  ws.onopen = function () { status.textContent = "conectado"; };
+
+  ws.onmessage = function (ev) {
+    var msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+
+    if (msg.type === "layout") {
+      spacesEl.innerHTML = "";
+      (msg.layout.spaces || []).forEach(function (space, si) {
+        (space.tabs || []).forEach(function (tab) {
+          var b = document.createElement("button");
+          b.textContent = space.name + " / " + tab.title + " " + marker(tab.agent);
+          b.onclick = function () {
+            ws.send(JSON.stringify({ type: "focus", session: tab.session }));
+          };
+          spacesEl.appendChild(b);
+        });
+      });
+    } else if (msg.type === "frame") {
+      rows = new Array(msg.rows).fill("");
+      (msg.changed || []).forEach(function (r) {
+        rows[r.index] = (r.runs || []).map(function (run) { return run.text; }).join("");
+      });
+      screenEl.textContent = rows.join("\n");
+    } else if (msg.type === "closed") {
+      status.textContent = "sesión " + msg.session + " cerrada";
+    }
+  };
+
+  ws.onclose = function () { status.textContent = "desconectado — recarga para reconectar"; };
+  ws.onerror = function () { status.textContent = "error de socket — revisa VPN y token"; };
+})();
+</script>
+</body>
+</html>
