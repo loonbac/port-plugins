@@ -71,6 +71,13 @@ pub(crate) fn layout_json(state: &HerdrState) -> Value {
                 .iter()
                 .map(|tab| {
                     let entry = state.agents.get(&tab.session_id);
+                    // El cwd viaja para que el cliente agrupe por proyecto sin
+                    // adivinar: ausente cuando la sesión aún no reportó el suyo,
+                    // nunca inventado.
+                    let cwd = state
+                        .session_cwds
+                        .get(&tab.session_id)
+                        .map(|cwd| cwd.to_string_lossy().into_owned());
                     json!({
                         "title": tab.title,
                         "session": tab.session_id,
@@ -78,6 +85,7 @@ pub(crate) fn layout_json(state: &HerdrState) -> Value {
                         // Un estado que nadie vio reclama atención; uno sin dato
                         // no reclama nada.
                         "seen": entry.map(|(_, seen)| *seen).unwrap_or(true),
+                        "cwd": cwd,
                     })
                 })
                 .collect();
@@ -113,6 +121,7 @@ fn hex(color: Rgb) -> String {
 mod tests {
     use super::*;
     use crate::state::{default_space, HerdrTab, PENDING_SESSION};
+    use std::path::PathBuf;
 
     /// Estado con un espacio y una pestaña, para mirar la forma del JSON.
     fn estado_de_prueba() -> HerdrState {
@@ -121,6 +130,9 @@ mod tests {
             ..HerdrState::default()
         };
         state.agents.insert(0, (AgentState::Blocked, false));
+        state
+            .session_cwds
+            .insert(0, PathBuf::from("/home/loonbac/Proyectos/pi-custom"));
         state
     }
 
@@ -139,9 +151,10 @@ mod tests {
         }
 
         let tab = &space["tabs"][0];
-        for clave in ["title", "session", "agent", "seen"] {
+        for clave in ["title", "session", "agent", "seen", "cwd"] {
             assert!(tab.get(clave).is_some(), "falta {clave} en {tab}");
         }
+        assert_eq!(tab["cwd"], "/home/loonbac/Proyectos/pi-custom");
     }
 
     /// El estado del agente viaja con el nombre que el cliente entiende.
