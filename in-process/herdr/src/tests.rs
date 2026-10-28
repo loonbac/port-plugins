@@ -11,6 +11,7 @@ use port_term_core::frame::Rgb;
 use port_term_core::input::Key;
 use port_term_core::pty::RunningApp;
 
+use crate::anim::CARD_PITCH;
 use crate::identity::{
     app_identity, tab_identity, ICON_CHIP, ICON_CPU, ICON_GEMINI, ICON_HEXAGON, ICON_PI, ICON_ROBOT,
 };
@@ -2405,6 +2406,7 @@ fn needs_animation_solo_con_marcador_animado_a_la_vista() {
     {
         let mut s = plugin.state.write().unwrap();
         s.spaces.push(HerdrSpace {
+            id: 2,
             name: "space-2".to_string(),
             branch: "main".to_string(),
             custom_color: None,
@@ -2455,10 +2457,13 @@ fn needs_animation_solo_con_marcador_animado_a_la_vista() {
 }
 
 /// Tres espacios mínimos para probar el reordenamiento por arrastre.
+///
+/// Ids 1..3 en ese orden: el primer espacio del estado por defecto es el 1.
 fn three_spaces(plugin: &HerdrPlugin) {
     let mut s = plugin.state.write().unwrap();
     for n in 2..=3 {
         s.spaces.push(HerdrSpace {
+            id: n,
             name: format!("space-{n}"),
             branch: "main".to_string(),
             custom_color: None,
@@ -2473,6 +2478,7 @@ fn three_spaces(plugin: &HerdrPlugin) {
             active_tab_index: 0,
         });
     }
+    s.next_space_id = 4;
 }
 
 fn space_names(plugin: &HerdrPlugin) -> Vec<String> {
@@ -2486,72 +2492,7 @@ fn space_names(plugin: &HerdrPlugin) -> Vec<String> {
         .collect()
 }
 
-#[test]
-fn arrastrar_sin_mover_es_un_clic_que_selecciona() {
-    let presence = empty_presence("drag-clic");
-    let plugin = HerdrPlugin::with_presence_dir(&presence);
-    three_spaces(&plugin);
-    // Clic en la tarjeta 2 sin mover: selecciona al soltar, sin reordenar.
-    plugin.state.write().unwrap().begin_space_drag(2, 100.0);
-    assert!(!plugin.state.write().unwrap().move_space_drag(103.0));
-    plugin.state.write().unwrap().end_space_drag();
-    let s = plugin.state.read().unwrap();
-    assert_eq!(s.active_space_index, 2);
-    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
-    assert!(s.space_drag.is_none());
-}
-
-#[test]
-fn arrastrar_hacia_abajo_intercambia_y_sigue_al_activo() {
-    let presence = empty_presence("drag-abajo");
-    let plugin = HerdrPlugin::with_presence_dir(&presence);
-    three_spaces(&plugin);
-    assert_eq!(plugin.state.read().unwrap().active_space_index, 0);
-    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
-    // Cruzar medio paso (22.5 px) intercambia con el vecino de abajo.
-    assert!(plugin.state.write().unwrap().move_space_drag(123.0));
-    assert_eq!(space_names(&plugin), vec!["space-2", "space-1", "space-3"]);
-    // El activo sigue a la tarjeta arrastrada.
-    assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
-    // Seguir bajando intercambia con el siguiente.
-    assert!(plugin.state.write().unwrap().move_space_drag(168.0));
-    assert_eq!(space_names(&plugin), vec!["space-2", "space-3", "space-1"]);
-    plugin.state.write().unwrap().end_space_drag();
-    let s = plugin.state.read().unwrap();
-    assert_eq!(s.active_space_index, 2);
-    assert!(s.space_drag.is_none());
-}
-
-#[test]
-fn arrastrar_hacia_arriba_intercambia_y_respeta_limites() {
-    let presence = empty_presence("drag-arriba");
-    let plugin = HerdrPlugin::with_presence_dir(&presence);
-    three_spaces(&plugin);
-    plugin.state.write().unwrap().begin_space_drag(2, 200.0);
-    assert!(plugin.state.write().unwrap().move_space_drag(177.0));
-    assert_eq!(space_names(&plugin), vec!["space-1", "space-3", "space-2"]);
-    // Por encima del primero no hay nada: no se mueve más.
-    assert!(plugin.state.write().unwrap().move_space_drag(100.0));
-    assert_eq!(space_names(&plugin), vec!["space-3", "space-1", "space-2"]);
-    assert!(plugin.state.write().unwrap().move_space_drag(0.0));
-    assert_eq!(space_names(&plugin), vec!["space-3", "space-1", "space-2"]);
-    plugin.state.write().unwrap().end_space_drag();
-}
-
-#[test]
-fn arrastrar_pide_animacion_aunque_no_haya_agentes() {
-    let presence = empty_presence("drag-anima");
-    let plugin = HerdrPlugin::with_presence_dir(&presence);
-    three_spaces(&plugin);
-    let needs = || plugin.layout_hook().expect("layout").needs_animation();
-    assert!(!needs());
-    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
-    assert!(needs());
-    plugin.state.write().unwrap().end_space_drag();
-    assert!(!needs());
-}
-
-/// Avanza la animación con un reloj simulado hasta que se detenga.
+/// Avanza el movimiento con un reloj simulado hasta que se detenga.
 ///
 /// Devuelve cuántos cuadros hicieron falta; es la forma de comprobar que el
 /// movimiento termina y no se queda pidiendo cuadros para siempre.
@@ -2559,8 +2500,8 @@ fn asentar_animacion(plugin: &HerdrPlugin) -> u32 {
     let mut t = 1_000u64;
     for frame in 0..600 {
         t += 16;
-        let mut s = plugin.state.write().unwrap();
-        if !s.step_space_motion(t) {
+        let moving = plugin.state.write().unwrap().step_space_motion(t);
+        if !moving {
             return frame + 1;
         }
     }
@@ -2568,82 +2509,303 @@ fn asentar_animacion(plugin: &HerdrPlugin) -> u32 {
 }
 
 #[test]
+fn arrastrar_sin_mover_es_un_clic_que_selecciona() {
+    let presence = empty_presence("drag-clic");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    // Clic en la tarjeta 3 sin mover: selecciona al soltar, sin reordenar.
+    plugin.state.write().unwrap().begin_space_drag(3, 100.0);
+    assert!(!plugin.state.write().unwrap().move_space_drag(103.0));
+    plugin.state.write().unwrap().end_space_drag();
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.active_space_index, 2);
+    drop(s);
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
+    // Un clic no deja nada pendiente ni pide cuadros.
+    assert!(plugin.state.read().unwrap().pending_order.is_none());
+    assert!(!plugin.state.read().unwrap().space_motion_active());
+}
+
+/// Arrastrar no toca la lista: el orden nuevo se aplica cuando asienta.
+///
+/// Esto es lo que impide que el espacio activo, los resortes y la lista
+/// cambien de dueño a mitad del gesto.
+#[test]
+fn arrastrar_no_reordena_hasta_que_asienta() {
+    let presence = empty_presence("drag-orden");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    // Cruzar medio paso ya pide la ranura siguiente.
+    assert!(plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6));
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.space_drag.map(|drag| drag.target), Some(1));
+    drop(s);
+    // La lista sigue como estaba: nada más ve un orden a medio armar.
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
+    assert!(plugin.state.read().unwrap().pending_order.is_none());
+
+    plugin.state.write().unwrap().end_space_drag();
+    // Al soltar, el orden nuevo queda pendiente y la lista espera.
+    assert!(plugin.state.read().unwrap().pending_order.is_some());
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
+
+    asentar_animacion(&plugin);
+    assert_eq!(space_names(&plugin), vec!["space-2", "space-1", "space-3"]);
+    let s = plugin.state.read().unwrap();
+    assert!(s.pending_order.is_none());
+    // La tarjeta soltada queda seleccionada.
+    assert_eq!(s.active_space_index, 1);
+}
+
+/// Arrastrar un espacio que no es el activo no cambia el espacio en pantalla.
+#[test]
+fn arrastrar_no_cambia_el_espacio_activo() {
+    let presence = empty_presence("drag-activo");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().active_space_index = 0;
+    plugin.state.write().unwrap().begin_space_drag(3, 200.0);
+    // Sube: el puntero se mueve hacia arriba, no hacia abajo.
+    for step in 1..=3 {
+        let y = 200.0 - CARD_PITCH * 0.6 * step as f32;
+        plugin.state.write().unwrap().move_space_drag(y);
+    }
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.active_space_index, 0, "el arrastre cambió el activo");
+    }
+    assert_eq!(space_names(&plugin)[0], "space-1");
+    plugin.state.write().unwrap().end_space_drag();
+    asentar_animacion(&plugin);
+    // Al soltar sí se selecciona lo arrastrado, que ahora está arriba.
+    let s = plugin.state.read().unwrap();
+    assert_eq!(s.spaces[s.active_space_index].name, "space-3");
+    drop(s);
+    assert_eq!(space_names(&plugin), vec!["space-3", "space-1", "space-2"]);
+}
+
+/// La ranura destino se recorta en los extremos: no se puede salir de la lista.
+#[test]
+fn arrastrar_respeta_los_limites() {
+    let presence = empty_presence("drag-limites");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(3, 200.0);
+    assert!(plugin.state.write().unwrap().move_space_drag(0.0));
+    assert_eq!(
+        plugin.state.read().unwrap().space_drag.map(|d| d.target),
+        Some(0)
+    );
+    assert!(plugin.state.write().unwrap().move_space_drag(9_000.0));
+    assert_eq!(
+        plugin.state.read().unwrap().space_drag.map(|d| d.target),
+        Some(2)
+    );
+    plugin.state.write().unwrap().end_space_drag();
+    asentar_animacion(&plugin);
+    assert_eq!(space_names(&plugin), vec!["space-1", "space-2", "space-3"]);
+}
+
+/// Repetir la misma posición del puntero da la misma ranura: el gesto no
+/// acumula error, así que un evento perdido no lo descoloca.
+#[test]
+fn el_arrastre_es_idempotente() {
+    let presence = empty_presence("drag-idempotente");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    let y = 100.0 + CARD_PITCH * 0.9;
+    plugin.state.write().unwrap().move_space_drag(y);
+    let first = plugin.state.read().unwrap().space_drag.map(|d| d.target);
+    for _ in 0..5 {
+        plugin.state.write().unwrap().move_space_drag(y);
+        assert_eq!(
+            plugin.state.read().unwrap().space_drag.map(|d| d.target),
+            first
+        );
+    }
+    // Y volver al punto de agarre deshace el cambio de ranura.
+    plugin.state.write().unwrap().move_space_drag(100.0);
+    assert_eq!(
+        plugin.state.read().unwrap().space_drag.map(|d| d.target),
+        Some(0)
+    );
+}
+
+/// Un movimiento posterior al soltar no mueve nada: el gesto terminó.
+///
+/// Es el defecto que se veía como «los spaces cambian de lado solos»: con el
+/// gesto pegado, el primer movimiento del mouse reordenaba la lista.
+#[test]
+fn despues_de_soltar_el_movimiento_no_hace_nada() {
+    let presence = empty_presence("drag-soltado");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6);
+    plugin.state.write().unwrap().end_space_drag();
+    let before = space_names(&plugin);
+    for y in [100.0, 400.0, 0.0, 250.0] {
+        assert!(
+            !plugin.state.write().unwrap().move_space_drag(y),
+            "move_space_drag siguió actuando después del soltar"
+        );
+    }
+    assert_eq!(space_names(&plugin), before);
+    assert!(plugin.state.read().unwrap().space_drag.is_none());
+}
+
+/// Cerrar el espacio agarrado cancela el gesto en vez de mover otra tarjeta.
+#[test]
+fn cerrar_el_espacio_agarrado_cancela_el_arrastre() {
+    let presence = empty_presence("drag-cierra");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(2, 100.0);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6);
+    plugin.state.write().unwrap().spaces.remove(1);
+    assert!(plugin.state.write().unwrap().move_space_drag(160.0));
+    assert!(plugin.state.read().unwrap().space_drag.is_none());
+    plugin.state.write().unwrap().end_space_drag();
+    assert!(plugin.state.read().unwrap().pending_order.is_none());
+}
+
+/// Mientras se arrastra, la ventana pide cuadros; al asentar, deja de pedirlos.
+#[test]
+fn el_arrastre_pide_cuadros_y_al_asentar_los_corta() {
+    let presence = empty_presence("drag-anima");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    let needs = || plugin.layout_hook().expect("layout").needs_animation();
+    assert!(!needs());
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6);
+    let t = 1_016u64;
+    assert!(plugin.state.write().unwrap().step_space_motion(t));
+    plugin.state.write().unwrap().end_space_drag();
+    asentar_animacion(&plugin);
+    assert!(!needs(), "quedó pidiendo cuadros en reposo");
+}
+
+/// Las vecinas se deslizan una ranura completa, no saltan.
+#[test]
 fn las_vecinas_se_deslizan_en_vez_de_saltar() {
     let presence = empty_presence("drag-desliza");
     let plugin = HerdrPlugin::with_presence_dir(&presence);
     three_spaces(&plugin);
-    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
-    plugin.state.write().unwrap().move_space_drag(123.0);
-
-    // La vecina que ocupó la ranura de la arrastrada arranca desplazada un paso
-    // de tarjeta: eso es lo que se ve como deslizamiento en vez de salto.
-    {
-        let s = plugin.state.read().unwrap();
-        let vecina = s.space_motion.springs[0].value().abs();
-        assert!(vecina > 1.0, "la vecina saltó sin deslizarse: {vecina}");
-        assert!(s.space_motion_active());
+    // Se asienta la entrada para que lo que se mida sea el arrastre.
+    asentar_animacion(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6);
+    let mut t = 2_000u64;
+    for _ in 0..8 {
+        t += 16;
+        plugin.state.write().unwrap().step_space_motion(t);
     }
 
+    // La vecina que ocupó la ranura de la arrastrada va en camino hacia arriba,
+    // no plantada en su ranura nueva.
+    {
+        let s = plugin.state.read().unwrap();
+        let vecina = s.card_frame.cards[1].offset_y;
+        assert!(
+            vecina < 0.0 && vecina > -CARD_PITCH,
+            "la vecina saltó a su ranura: {vecina}"
+        );
+    }
+    plugin.state.write().unwrap().end_space_drag();
     asentar_animacion(&plugin);
     let s = plugin.state.read().unwrap();
-    assert_eq!(s.space_motion.springs[0].value(), 0.0);
+    assert!(s.card_frame.cards.iter().all(|card| card.offset_y == 0.0));
 }
 
+/// La tarjeta agarrada sigue al puntero y el levantado sube mientras se mueve.
 #[test]
 fn la_tarjeta_arrastrada_sigue_al_puntero() {
     let presence = empty_presence("drag-sigue");
     let plugin = HerdrPlugin::with_presence_dir(&presence);
     three_spaces(&plugin);
-    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
-    // Un movimiento que cruza medio paso: la tarjeta pasa a la ranura 1 y el
-    // ancla se recentra en 145, así que el puntero (123) quedó 22 px por encima.
+    asentar_animacion(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
     plugin.state.write().unwrap().move_space_drag(123.0);
 
-    let mut t = 1_000u64;
-    let mut s = plugin.state.write().unwrap();
-    for _ in 0..60 {
+    let mut t = 2_000u64;
+    let mut frame = Default::default();
+    for _ in 0..90 {
         t += 16;
-        s.step_space_motion(t);
+        plugin.state.write().unwrap().step_space_motion(t);
+        frame = plugin.state.read().unwrap().card_frame.clone();
     }
-    let offset = s.space_motion.springs[1].value();
-    drop(s);
-
+    let offset = frame.cards[0].offset_y;
     assert!(
-        (offset - (-22.0)).abs() < 1.0,
-        "la tarjeta debería seguir al puntero 22 px arriba: {offset}"
+        (offset - 23.0).abs() < 1.0,
+        "la tarjeta no sigue al puntero: {offset} px"
     );
+    assert!(frame.lift > 0.9, "el levantado no llegó: {}", frame.lift);
 }
 
+/// Al soltar, la tarjeta asienta en su ranura y el movimiento termina.
 #[test]
 fn soltar_asienta_la_tarjeta_y_la_animacion_termina() {
     let presence = empty_presence("drag-asienta");
     let plugin = HerdrPlugin::with_presence_dir(&presence);
     three_spaces(&plugin);
-    plugin.state.write().unwrap().begin_space_drag(0, 100.0);
-    plugin.state.write().unwrap().move_space_drag(123.0);
+    asentar_animacion(&plugin);
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    plugin
+        .state
+        .write()
+        .unwrap()
+        .move_space_drag(100.0 + CARD_PITCH * 0.6);
     plugin.state.write().unwrap().end_space_drag();
 
     // Ya soltada, la tarjeta sigue fuera de su ranura: los cuadros deben seguir
     // fluyendo para que el resorte la asiente, no quedar congelada a mitad.
     let needs = || plugin.layout_hook().expect("layout").needs_animation();
     assert!(needs());
-    assert_eq!(plugin.state.read().unwrap().active_space_index, 1);
+    // La selección es por id: justo al soltar, la lista todavía no se movió, así
+    // que el índice sigue siendo el viejo.
+    {
+        let s = plugin.state.read().unwrap();
+        assert_eq!(s.spaces[s.active_space_index].name, "space-1");
+        assert_eq!(s.active_space_index, 0);
+    }
 
     asentar_animacion(&plugin);
 
     let s = plugin.state.read().unwrap();
+    // Y después de aplicar el orden, el activo sigue siendo el mismo espacio.
+    assert_eq!(s.spaces[s.active_space_index].name, "space-1");
+    assert_eq!(s.active_space_index, 1);
     assert!(
-        s.space_motion
-            .springs
-            .iter()
-            .all(|spring| spring.value() == 0.0),
+        s.card_frame.cards.iter().all(|card| card.offset_y == 0.0),
         "quedaron tarjetas desplazadas"
     );
-    assert_eq!(s.space_motion.lift, 0.0);
+    assert_eq!(s.card_frame.lift, 0.0);
     drop(s);
     assert!(!needs());
 }
-
 #[test]
 fn pestana_nueva_hereda_el_cwd_de_la_activa() {
     let presence = empty_presence("hereda-cwd");
