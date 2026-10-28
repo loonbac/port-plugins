@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    black, div, point, px, rgb, AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton,
+    black, div, point, px, AnyElement, BoxShadow, FontWeight, IntoElement, MouseButton,
     ParentElement, Styled, Window,
 };
 
@@ -15,20 +15,33 @@ use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 
 use crate::agents;
-use crate::anim::ease_out_cubic;
+use crate::anim::{CardFrame, CARD_GAP, CARD_HEIGHT};
 use crate::color::to_hsla;
 use crate::state::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
 use crate::watch::{clip_last_step, request_watch};
 use crate::HerdrPlugin;
 
-/// Zona sensible del asidero, en píxeles. Centrada en el borde, se extiende
-/// medio ancho a cada lado para que el arrastre no sea preciso al píxel.
+/// Zona sensible del asidero de ancho, en píxeles.
+///
+/// Vive enteramente DENTRO del panel: una zona centrada en el borde se solapa
+/// con la columna de la terminal, y el puntero sobre esa franja queda en una
+/// hitbox ambigua entre dos hermanos del layout.
 const RESIZE_HANDLE_HIT: f32 = 7.0;
+/// Ancho de la pista visible del asidero.
+const RESIZE_GRIP_WIDTH: f32 = 2.0;
 
 /// Color de aviso para agentes bloqueados (`Blocked`).
 const COLOR_BLOCKED: Rgb = Rgb::new(0xe5, 0x53, 0x4b);
 /// Color de éxito para agentes listos sin ver (`Idle` con `seen = false`).
 const COLOR_IDLE_UNSEEN: Rgb = Rgb::new(0x39, 0xc5, 0xcf);
+/// Nombre del espacio activo.
+const COLOR_NAME_ACTIVE: Rgb = Rgb::new(0xf0, 0xf6, 0xfc);
+/// Nombre de un espacio en reposo.
+const COLOR_NAME: Rgb = Rgb::new(0xc9, 0xd1, 0xd9);
+/// Texto secundario (rama, etiqueta de subagente).
+const COLOR_MUTED: Rgb = Rgb::new(0x8b, 0x94, 0x9e);
+/// Texto terciario (último paso, pistas).
+const COLOR_FAINT: Rgb = Rgb::new(0x6e, 0x76, 0x81);
 /// Periodo del parpadeo de aviso (`Blocked`), en milisegundos: encendido medio
 /// periodo, tenue medio periodo.
 const BLOCKED_BLINK_PERIOD_MS: u64 = 1000;
@@ -48,20 +61,28 @@ pub(crate) fn blink_on(now_ms: u64, period_ms: u64) -> bool {
 }
 
 pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
-    // Un solo candado por cuadro: el mismo préstamo decide si la barra se pinta
-    // y avanza la animación. La ventana de escritura es corta a propósito (se
-    // cierra al copiar el estado, antes de construir los elementos).
+    // Un solo candado por cuadro: el mismo préstamo avanza la animación y copia
+    // lo que el render necesita. La ventana de escritura es corta a propósito
+    // (se cierra al copiar el estado, antes de construir los elementos).
     let now_ms = agents::now_ms();
     let mut state = plugin.state.write().unwrap();
     // El mismo criterio que reserva el ancho de la barra decide si se pinta
     // (ver `sidebar_shown`). Si sólo hay un espacio y no hay subagentes
     // visibles, la terminal es limpia.
     if !plugin.sidebar_shown(&state) {
+        // Sin panel no hay gesto ni movimiento que recordar: al volver, las
+        // tarjetas tienen que entrar animadas en vez de aparecer quietas donde
+        // quedaron la última vez.
+        state.space_drag = None;
+        state.resize_anchor_x = None;
+        state.pending_order = None;
+        state.space_motion.reset();
+        state.card_frame = Default::default();
         return None;
     }
-    // La animación de las tarjetas avanza aquí, una vez por cuadro, con el
-    // reloj del render: el plugin no tiene temporizadores propios. El mismo
-    // instante se reutiliza abajo para el spinner y los parpadeos.
+    // La animación avanza aquí, una vez por cuadro, con el reloj del render: el
+    // plugin no tiene temporizadores propios. El mismo instante se reutiliza
+    // abajo para el spinner y los parpadeos.
     state.step_space_motion(now_ms);
 
     let active_space_idx = state.active_space_index;
@@ -70,16 +91,10 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let accent = to_hsla(state.effective_accent());
     let state_sidebar_width = state.sidebar_width;
     let state_is_resizing = state.resize_anchor_x.is_some();
-    let drag_index = state.space_drag.map(|drag| drag.index);
-    // Un desplazamiento por tarjeta, en el mismo orden que `spaces`: la
-    // arrastrada persigue al puntero y las demás vuelven a su ranura.
-    let card_offsets: Vec<f32> = state
-        .space_motion
-        .springs
-        .iter()
-        .map(|spring| spring.value())
-        .collect();
-    let drag_lift = state.space_motion.lift;
+    let drag_id = state.space_drag.map(|drag| drag.id);
+    // El fotograma que calculó `step_space_motion`: un desplazamiento, una
+    // opacidad y un tinte por tarjeta, en el mismo orden que `spaces`.
+    let frame = state.card_frame.clone();
     let space_agent_states: Vec<Option<(AgentState, bool)>> = spaces
         .iter()
         .map(|space| space.aggregated_agent_state(&state.agents))
@@ -95,53 +110,88 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
         let is_active = i == active_space_idx;
         let dot_color = space.custom_color.map(to_hsla).unwrap_or(accent);
         let agent_state = space_agent_states[i];
-        let is_dragged = drag_index == Some(i);
-        let card_offset = card_offsets.get(i).copied().unwrap_or(0.0);
-        // El realce crece y decrece con una curva en vez de encenderse de golpe:
-        // tomar la tarjeta se siente como levantarla, no como un interruptor.
-        let lifted = if is_dragged {
-            ease_out_cubic(drag_lift)
-        } else {
-            0.0
-        };
+        let is_dragged = drag_id == Some(space.id);
+        let card = frame.cards.get(i).copied().unwrap_or(CardFrame {
+            offset_y: 0.0,
+            opacity: 1.0,
+            tint: if is_active { 1.0 } else { 0.0 },
+        });
+        // La tarjeta arrastrada se levanta: sombra, tinte pleno y borde cerrado.
+        let lifted = if is_dragged { frame.lift } else { 0.0 };
+        let alpha = card.opacity;
 
-        // Realce de tarjeta: Blocked o Idle sin ver tiñen borde y fondo de la tarjeta con su color;
-        // la tarjeta activa conserva el tinte de acento cuando no hay aviso.
+        // Realce de tarjeta: Blocked o Idle sin ver tiñen borde y fondo con su
+        // color; el resto usa el tinte del espacio activo, que se interpola en
+        // vez de encenderse de golpe al cambiar de espacio.
         let (card_bg, card_border) = match agent_state {
-            Some((AgentState::Blocked, _)) => (warn_hsla.opacity(0.20), warn_hsla.opacity(0.55)),
-            Some((AgentState::Idle, false)) => {
-                (success_hsla.opacity(0.12), success_hsla.opacity(0.40))
-            }
-            _ if is_active => (accent.opacity(0.20), accent.opacity(0.55)),
-            _ => (term_bg.opacity(0.0), term_bg.opacity(0.0)),
+            Some((AgentState::Blocked, _)) => (
+                warn_hsla.opacity(0.20 * alpha),
+                warn_hsla.opacity(0.55 * alpha),
+            ),
+            Some((AgentState::Idle, false)) => (
+                success_hsla.opacity(0.12 * alpha),
+                success_hsla.opacity(0.40 * alpha),
+            ),
+            _ => (
+                accent.opacity(0.20 * card.tint * alpha),
+                accent.opacity(0.55 * card.tint * alpha),
+            ),
         };
-        // Tarjeta arrastrada: el tinte acento sube con el levantado y el borde
-        // se cierra del todo, para que se lea separada del resto de la lista.
+        // Arrastrada: el tinte sube con el levantado y el borde se cierra del
+        // todo, para que se lea separada del resto de la lista.
         let (card_bg, card_border) = if is_dragged {
             (
-                accent.opacity(0.10 + 0.20 * lifted),
-                accent.opacity(0.45 + 0.55 * lifted),
+                accent.opacity((0.10 + 0.20 * lifted) * alpha),
+                accent.opacity((0.45 + 0.55 * lifted) * alpha),
             )
         } else {
             (card_bg, card_border)
         };
 
+        // Hover: la tarjeta se aclara bajo el puntero. Se calcula acá, con el
+        // tinte incluido, porque un realce de hover fijo pisaría el del espacio
+        // activo en vez de sumarse.
+        let hover_bg = match agent_state {
+            Some((AgentState::Blocked, _)) => warn_hsla.opacity(0.28),
+            Some((AgentState::Idle, false)) => success_hsla.opacity(0.20),
+            _ => accent.opacity(0.10 + 0.10 * card.tint),
+        };
+        let hover_border = match agent_state {
+            Some((AgentState::Blocked, _)) => warn_hsla.opacity(0.70),
+            Some((AgentState::Idle, false)) => success_hsla.opacity(0.55),
+            _ => accent.opacity(0.40 + 0.30 * card.tint),
+        };
+
         // Animación por reloj de render (ver `spinner_frame`/`blink_on`).
-        // Marcador a la derecha de la fila del nombre: glifo + texto corto según estado
+        // Marcador a la derecha de la fila del nombre: glifo + texto corto según
+        // estado.
         let marker = match agent_state {
-            Some((AgentState::Working, _)) => Some((spinner_frame(now_ms), "working", accent)),
+            Some((AgentState::Working, _)) => {
+                Some((spinner_frame(now_ms), "working", accent.opacity(alpha)))
+            }
             Some((AgentState::Blocked, _)) => {
                 let color = if blink_on(now_ms, BLOCKED_BLINK_PERIOD_MS) {
-                    warn_hsla
+                    warn_hsla.opacity(alpha)
                 } else {
-                    warn_hsla.opacity(0.25)
+                    warn_hsla.opacity(0.25 * alpha)
                 };
                 Some(("●", "espera tu respuesta", color))
             }
-            Some((AgentState::Idle, false)) => Some(("✓", "listo", success_hsla)),
+            Some((AgentState::Idle, false)) => Some(("✓", "listo", success_hsla.opacity(alpha))),
             Some((AgentState::Idle, true)) | Some((AgentState::Unknown, _)) | None => None,
         };
 
+        let name_color = to_hsla(if is_active {
+            COLOR_NAME_ACTIVE
+        } else {
+            COLOR_NAME
+        });
+        let branch_color = if is_active {
+            accent
+        } else {
+            to_hsla(COLOR_MUTED)
+        };
+        let space_id = space.id;
         let state_for_click = Arc::clone(&plugin.state);
         let mut item = div()
             .flex()
@@ -149,27 +199,34 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .items_center()
             .justify_between()
             .gap(px(8.0))
+            // Alto fijo: el paso del arrastre (`CARD_PITCH`) se deriva de este
+            // número, así que no puede depender del texto (ver `anim`).
+            .h(px(CARD_HEIGHT))
             .px(px(10.0))
-            .py(px(6.0))
             .rounded(px(6.0))
             .cursor_grab()
+            .overflow_hidden()
+            .hover(move |style| style.bg(hover_bg).border_color(hover_border))
             // El desplazamiento entra como margen arriba y su negativo abajo:
             // la tarjeta se corre sin empujar a las demás fuera de su ranura,
             // que es lo que hace legible el reordenamiento en vivo.
-            .mt(px(card_offset))
-            .mb(px(-card_offset))
+            .mt(px(card.offset_y))
+            .mb(px(-card.offset_y))
             .bg(card_bg)
             .border_1()
             .border_color(card_border)
+            // Clave de las pruebas de layout (ver `layout_test`): mide el alto
+            // de la tarjeta y el paso real entre tarjetas.
+            .debug_selector(move || format!("herdr-sidebar-space-card-{i}"))
             .on_mouse_down(MouseButton::Left, move |event, window: &mut Window, _cx| {
                 let y: f32 = event.position.y.into();
-                {
-                    let mut s = state_for_click.write().unwrap();
-                    // No selecciona todavía: si el puntero no se mueve es un
-                    // clic y `end_space_drag` seleccionará al soltar; si se
-                    // mueve, empieza el reordenamiento en vivo.
-                    s.begin_space_drag(i, y);
-                }
+                // No selecciona todavía: si el puntero no se mueve es un clic y
+                // `end_space_drag` seleccionará al soltar; si se mueve, empieza
+                // el reordenamiento.
+                state_for_click
+                    .write()
+                    .unwrap()
+                    .begin_space_drag(space_id, y);
                 window.refresh();
             })
             .child(
@@ -190,7 +247,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             .w(px(8.0))
                             .h(px(8.0))
                             .rounded(px(4.0))
-                            .bg(dot_color),
+                            .bg(dot_color.opacity(alpha)),
                     )
                     .child(
                         div()
@@ -207,11 +264,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     // `layout_test`): permite medir que el
                                     // texto no sale del panel.
                                     .debug_selector(move || format!("herdr-sidebar-space-name-{i}"))
-                                    .text_color(if is_active {
-                                        rgb(0xf0f6fc)
-                                    } else {
-                                        rgb(0xc9d1d9)
-                                    })
+                                    .text_color(name_color.opacity(alpha))
                                     .child(space.name.clone()),
                             )
                             .child(
@@ -221,11 +274,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     .debug_selector(move || {
                                         format!("herdr-sidebar-space-branch-{i}")
                                     })
-                                    .text_color(if is_active {
-                                        accent
-                                    } else {
-                                        rgb(0x8b949e).into()
-                                    })
+                                    .text_color(branch_color.opacity(alpha))
                                     .child(space.branch.clone()),
                             ),
                     ),
@@ -270,13 +319,13 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
 
     // La tarjeta arrastrada se pinta al final para quedar por encima de las
     // demás mientras se desliza entre ellas.
-    if let Some(i) = drag_index {
-        if i < cards.len() {
+    if let Some(id) = drag_id {
+        if let Some(i) = spaces.iter().position(|space| space.id == id) {
             let dragged = cards.remove(i);
             cards.push(dragged);
         }
     }
-    let spaces_list = div().flex().flex_col().gap(px(4.0)).children(cards);
+    let spaces_list = div().flex().flex_col().gap(px(CARD_GAP)).children(cards);
 
     // ── Sección AGENTS ──────────────────────────────────────────────────
     // Lista de subagentes de pi, en vivo. Los vivos van arriba y llevan el
@@ -302,7 +351,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 let dot = if entry.status.is_live() {
                     accent
                 } else {
-                    rgb(0x6e7681).into()
+                    to_hsla(COLOR_FAINT)
                 };
                 // El cierre se puede invocar más de una vez, así que la
                 // fila se captura por valor en lugar de prestarse.
@@ -325,6 +374,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                     .border_1()
                     .border_color(accent.opacity(0.28))
                     .cursor_pointer()
+                    .hover(move |style| style.bg(accent.opacity(0.18)))
                     .on_mouse_down(
                         MouseButton::Left,
                         move |_event, window: &mut Window, _cx| {
@@ -368,11 +418,11 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                             .font_weight(FontWeight::BOLD)
                                             .truncate()
                                             .debug_selector(move || name_key)
-                                            .text_color(if entry.status.is_live() {
-                                                rgb(0xf0f6fc)
+                                            .text_color(to_hsla(if entry.status.is_live() {
+                                                COLOR_NAME_ACTIVE
                                             } else {
-                                                rgb(0x8b949e)
-                                            })
+                                                COLOR_MUTED
+                                            }))
                                             .child(entry.agent.clone()),
                                     ),
                             )
@@ -390,7 +440,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                     .text_color(if entry.status.is_live() {
                                         accent
                                     } else {
-                                        rgb(0x6e7681).into()
+                                        to_hsla(COLOR_FAINT)
                                     })
                                     .child(entry.status.label()),
                             ),
@@ -400,7 +450,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             .text_size(px(11.0))
                             .truncate()
                             .debug_selector(move || label_key)
-                            .text_color(rgb(0x8b949e))
+                            .text_color(to_hsla(COLOR_MUTED))
                             .child(if entry.label.is_empty() {
                                 entry.id.clone()
                             } else {
@@ -412,7 +462,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             .text_size(px(10.0))
                             .truncate()
                             .debug_selector(move || step_key)
-                            .text_color(rgb(0x6e7681))
+                            .text_color(to_hsla(COLOR_FAINT))
                             .child(clip_last_step(&entry.last_step)),
                     )
             })
@@ -454,7 +504,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                             div()
                                 .text_size(px(11.0))
                                 .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0x8b949e))
+                                .text_color(to_hsla(COLOR_MUTED))
                                 .child("SPACES"),
                         )
                         .child(
@@ -491,7 +541,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                                 div()
                                     .text_size(px(11.0))
                                     .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0x8b949e))
+                                    .text_color(to_hsla(COLOR_MUTED))
                                     .child("AGENTS"),
                             )
                             .child(
@@ -519,7 +569,7 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 .py(px(6.0))
                 .text_size(px(11.0))
                 .truncate()
-                .text_color(rgb(0x6e7681))
+                .text_color(to_hsla(COLOR_FAINT))
                 .child("Ctrl+Alt+T Nuevo espacio"),
         );
 
@@ -527,15 +577,41 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     // contra su borde derecho.
     let mut shell = div().relative().w(px(width)).h_full().child(sidebar);
 
-    // Asidero de ancho: zona sensible centrada en el borde derecho.
+    // Salida única de los dos gestos de la barra.
+    //
+    // Vive en el armazón —que existe en todos los cuadros— y en fase de
+    // captura, así que llega aunque el puntero esté sobre la terminal y aunque el
+    // `mouse_up` ocurra antes de que se pinte la capa de arrastre. Con el
+    // listener en esa capa, un clic rápido dejaba el gesto pegado: el siguiente
+    // movimiento del mouse reordenaba los espacios sin ningún botón apretado y
+    // la ventana quedaba pidiendo cuadros para siempre.
+    let state_for_up = Arc::clone(&plugin.state);
+    shell = shell.capture_any_mouse_up(move |_event, window: &mut Window, _cx| {
+        let ended = {
+            let mut s = state_for_up.write().unwrap();
+            let resizing = s.resize_anchor_x.take().is_some();
+            let dragging = s.space_drag.is_some();
+            if dragging {
+                s.end_space_drag();
+            }
+            resizing || dragging
+        };
+        if ended {
+            window.refresh();
+        }
+    });
+
+    // Asidero de ancho: toda la zona sensible queda dentro del panel, con una
+    // pista visible para que se sepa que el borde se puede agarrar.
     let state_for_begin = Arc::clone(&plugin.state);
     let handle = div()
         .absolute()
         .left(px(width - RESIZE_HANDLE_HIT))
         .top(px(0.0))
         .h_full()
-        .w(px(RESIZE_HANDLE_HIT * 2.0))
+        .w(px(RESIZE_HANDLE_HIT))
         .cursor_col_resize()
+        .hover(move |style| style.bg(accent.opacity(0.18)))
         .child(
             // Pista visual de que el borde es agarrable.
             div()
@@ -543,8 +619,8 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 .right(px(0.0))
                 .top(px(0.0))
                 .h_full()
-                .w(px(2.0))
-                .bg(accent.opacity(0.0)),
+                .w(px(RESIZE_GRIP_WIDTH))
+                .bg(accent.opacity(if resizing { 0.85 } else { 0.35 })),
         )
         .on_mouse_down(MouseButton::Left, move |event, window, _cx| {
             let x: f32 = event.position.x.into();
@@ -558,13 +634,13 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
 
     shell = shell.child(handle);
 
-    // Mientras se arrastra, una capa invisible cubre toda la ventana para
+    // Mientras se arrastra el ancho, una capa invisible cubre la ventana para
     // seguir recibiendo movimiento. Debe abarcar también hacia la IZQUIERDA
     // del asidero: estrechar implica mover el cursor hacia atrás, y si la
-    // capa empezara en el borde el rastreo se perdería al primer paso.
+    // capa empezara en el borde el rastreo se perdería al primer paso. El
+    // final del gesto lo recibe el armazón, no esta capa.
     if resizing {
         let state_for_move = Arc::clone(&plugin.state);
-        let state_for_end = Arc::clone(&plugin.state);
         let overlay = div()
             .absolute()
             .left(px(0.0))
@@ -586,20 +662,14 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                     .clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
                 drop(s);
                 window.refresh();
-            })
-            .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
-                state_for_end.write().unwrap().resize_anchor_x = None;
-                window.refresh();
             });
         shell = shell.child(overlay);
     }
 
-    // Mientras se arrastra una tarjeta, una capa invisible cubre la ventana
-    // para seguir al puntero hasta el `mouse_up`, con el mismo patrón del
-    // asidero de ancho.
-    if drag_index.is_some() {
+    // Mientras se arrastra una tarjeta, una capa invisible cubre la ventana para
+    // seguir al puntero; el `mouse_up` lo recibe el armazón (ver arriba).
+    if drag_id.is_some() {
         let state_for_move = Arc::clone(&plugin.state);
-        let state_for_end = Arc::clone(&plugin.state);
         let overlay = div()
             .absolute()
             .left(px(0.0))
@@ -613,10 +683,6 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
                 if changed {
                     window.refresh();
                 }
-            })
-            .on_mouse_up(MouseButton::Left, move |_event, window, _cx| {
-                state_for_end.write().unwrap().end_space_drag();
-                window.refresh();
             });
         shell = shell.child(overlay);
     }

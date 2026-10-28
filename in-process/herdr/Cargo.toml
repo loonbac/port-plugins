@@ -10,6 +10,12 @@ port-plugin-api = { workspace = true }
 port-term-core = { workspace = true }
 gpui = { workspace = true }
 serde_json = { workspace = true }
+# Movimiento declarativo (resortes, curvas e interrupción con velocidad) para la
+# barra lateral. Se usa SÓLO su parte portable — `default-features = false`: sin
+# la feature `gpui` no arrastra `gpui-ce`, que sería una segunda copia de GPUI
+# con tipos distintos a los de PORT. El reloj lo pone el render del anfitrión,
+# porque un plugin no puede pedir cuadros por su cuenta.
+gpui-ce-motion = { version = "=0.4.0", default-features = false }
 
 # La ventana de prueba de GPUI (`TestAppContext`) y `debug_bounds` viven detrás
 # de esa feature: sin ella `debug_selector` es un no-op y las pruebas de layout

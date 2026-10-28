@@ -19,12 +19,16 @@ use gpui::{
 use port_plugin_api::LayoutHook;
 use port_term_core::pty::RunningApp;
 
+use crate::anim::{CARD_HEIGHT, CARD_PITCH};
 use crate::state::{HerdrSpace, HerdrTab};
 use crate::tests::{empty_presence, seed_watch_agent_with};
 use crate::{HerdrPlugin, SIDEBAR_DEFAULT_WIDTH};
 
 // ── Claves de `debug_selector` ─────────────────────────────────────────
 const PANEL_LATERAL: &str = "herdr-sidebar";
+const TARJETA_0: &str = "herdr-sidebar-space-card-0";
+const TARJETA_1: &str = "herdr-sidebar-space-card-1";
+const TARJETA_2: &str = "herdr-sidebar-space-card-2";
 const NOMBRE_ESPACIO: &str = "herdr-sidebar-space-name-0";
 const RAMA_ESPACIO: &str = "herdr-sidebar-space-branch-0";
 const AGENTE_NOMBRE: &str = "herdr-sidebar-agent-name-t_largo";
@@ -39,8 +43,9 @@ const BOTON_NUEVA_PESTANA: &str = "herdr-topbar-new-tab";
 const ALTO_BARRA_SUPERIOR: f32 = 38.0;
 
 /// Espacio con el nombre y la rama indicados.
-fn espacio(nombre: &str, branch: &str, tabs: Vec<HerdrTab>) -> HerdrSpace {
+fn espacio(id: usize, nombre: &str, branch: &str, tabs: Vec<HerdrTab>) -> HerdrSpace {
     HerdrSpace {
+        id,
         name: nombre.to_string(),
         branch: branch.to_string(),
         custom_color: None,
@@ -146,10 +151,10 @@ async fn un_nombre_de_espacio_largo_no_se_sale_del_panel_lateral(cx: &mut TestAp
     {
         let mut s = plugin.state.write().unwrap();
         let tabs = s.spaces[0].tabs.clone();
-        s.spaces[0] = espacio(largo, &format!("feature/{largo}"), tabs);
+        s.spaces[0] = espacio(1, largo, &format!("feature/{largo}"), tabs);
         // Un segundo espacio mantiene la barra abierta sin depender de la
         // presencia de subagentes de esta máquina.
-        s.spaces.push(espacio("space-2", "main", Vec::new()));
+        s.spaces.push(espacio(2, "space-2", "main", Vec::new()));
     }
 
     let plugin = Rc::new(plugin);
@@ -303,6 +308,54 @@ async fn una_pestana_corta_conserva_su_ancho_natural(cx: &mut TestAppContext) {
     );
 }
 
+/// El paso entre tarjetas es exactamente alto más separación.
+///
+/// El arrastre convierte píxeles en ranuras dividiendo por `CARD_PITCH`, así que
+/// este número tiene que ser el del layout real. Mientras fue una estimación
+/// (`45.0`) el error se acumulaba en el ancla del gesto y un movimiento mínimo
+/// cruzaba dos ranuras. Si un estilo mueve la altura o la separación, esta
+/// prueba falla antes de que el arrastre empiece a descolocarse.
+#[gpui::test]
+async fn las_tarjetas_miden_un_paso_exacto(cx: &mut TestAppContext) {
+    let presence = empty_presence("layout-paso");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    {
+        let mut s = plugin.state.write().unwrap();
+        let tabs = s.spaces[0].tabs.clone();
+        s.spaces[0] = espacio(1, "space-1", "main", tabs);
+        for id in 2..=3 {
+            s.spaces
+                .push(espacio(id, &format!("space-{id}"), "main", Vec::new()));
+        }
+    }
+
+    let plugin = Rc::new(plugin);
+    let barra = Rc::clone(&plugin);
+    let bounds = medir_en_vista(
+        cx,
+        move || barra.left_sidebar().expect("la barra lateral se pinta"),
+        &[PANEL_LATERAL, TARJETA_0, TARJETA_1, TARJETA_2],
+    );
+
+    for (i, tarjeta) in bounds[1..].iter().enumerate() {
+        assert_eq!(
+            tarjeta.size.height,
+            px(CARD_HEIGHT),
+            "la tarjeta {i} no mide el alto declarado"
+        );
+        assert_dentro(tarjeta, &bounds[0], "la tarjeta");
+    }
+    for par in bounds[1..].windows(2) {
+        assert_eq!(
+            par[1].top() - par[0].top(),
+            px(CARD_PITCH),
+            "las tarjetas no están a un paso exacto: {:?} y {:?}",
+            par[0],
+            par[1]
+        );
+    }
+}
+
 /// Una tarjeta con un agente en estado `Blocked` pinta su marcador de atención
 /// (`herdr-sidebar-space-agent-{i}`) dentro del panel lateral.
 #[gpui::test]
@@ -312,11 +365,11 @@ async fn una_tarjeta_con_agente_blocked_pinta_su_marcador(cx: &mut TestAppContex
     {
         let mut s = plugin.state.write().unwrap();
         let tabs = s.spaces[0].tabs.clone();
-        s.spaces[0] = espacio("space-1", "main", tabs);
+        s.spaces[0] = espacio(1, "space-1", "main", tabs);
         // Segundo espacio para que la barra se dibuje fija
         let mut p = pestana(10, "pi");
         p.session_id = 10;
-        s.spaces.push(espacio("space-2", "main", vec![p]));
+        s.spaces.push(espacio(2, "space-2", "main", vec![p]));
         s.agents
             .insert(10, (port_plugin_api::AgentState::Blocked, false));
     }

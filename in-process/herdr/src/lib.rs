@@ -262,7 +262,9 @@ impl HerdrPlugin {
         let next_tab = s.next_tab_id;
         s.next_tab_id += 1;
 
+        let id = s.allocate_space_id();
         s.spaces.push(HerdrSpace {
+            id,
             name: format!("space-{num}"),
             branch: "main".to_string(),
             custom_color: None,
@@ -509,7 +511,9 @@ impl Plugin for HerdrPlugin {
                         if !use_session_zero {
                             pending_shells.push(tab_id);
                         }
+                        let id = s.allocate_space_id();
                         parsed_spaces.push(HerdrSpace {
+                            id,
                             name: name.trim().to_string(),
                             branch: branch.trim().to_string(),
                             custom_color: None,
