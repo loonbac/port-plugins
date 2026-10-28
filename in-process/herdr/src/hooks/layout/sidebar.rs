@@ -15,7 +15,7 @@ use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 
 use crate::agents;
-use crate::anim::{CardFrame, CARD_GAP, CARD_HEIGHT};
+use crate::anim::{CardFrame, CARD_GAP, CARD_HEIGHT, CARD_PITCH};
 use crate::color::to_hsla;
 use crate::state::{SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH};
 use crate::watch::{clip_last_step, request_watch};
@@ -105,6 +105,9 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
     let success_hsla = to_hsla(COLOR_IDLE_UNSEEN);
     let term_bg = to_hsla(Rgb::DEFAULT_BG);
     let mut cards: Vec<AnyElement> = Vec::new();
+    // La tarjeta que sigue al puntero, si hay un arrastre en curso. Se pinta
+    // aparte porque va fuera del flujo (ver el final del bucle).
+    let mut dragged_card: Option<AnyElement> = None;
 
     for (i, space) in spaces.iter().enumerate() {
         let is_active = i == active_space_idx;
@@ -207,11 +210,6 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .cursor_grab()
             .overflow_hidden()
             .hover(move |style| style.bg(hover_bg).border_color(hover_border))
-            // El desplazamiento entra como margen arriba y su negativo abajo:
-            // la tarjeta se corre sin empujar a las demás fuera de su ranura,
-            // que es lo que hace legible el reordenamiento en vivo.
-            .mt(px(card.offset_y))
-            .mb(px(-card.offset_y))
             .bg(card_bg)
             .border_1()
             .border_color(card_border)
@@ -314,18 +312,43 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             }]);
         }
 
-        cards.push(item.into_any_element());
-    }
-
-    // La tarjeta arrastrada se pinta al final para quedar por encima de las
-    // demás mientras se desliza entre ellas.
-    if let Some(id) = drag_id {
-        if let Some(i) = spaces.iter().position(|space| space.id == id) {
-            let dragged = cards.remove(i);
-            cards.push(dragged);
+        if is_dragged {
+            // En su ranura queda un marcador del mismo alto: si la tarjeta
+            // saliera del flujo, las demás subirían una posición.
+            cards.push(div().flex_shrink_0().h(px(CARD_HEIGHT)).into_any_element());
+            // Y la tarjeta se pinta fuera del flujo, anclada a esa ranura más lo
+            // que la movió el puntero. Antes se la movía al final de los hijos
+            // del `flex_col` para que quedara por encima, y eso no cambia el
+            // orden de pintado: cambia el layout, así que la arrastrada se
+            // dibujaba al pie de la lista, debajo de todas.
+            dragged_card = Some(
+                item.absolute()
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .top(px(i as f32 * CARD_PITCH + card.offset_y))
+                    .into_any_element(),
+            );
+        } else {
+            // El desplazamiento entra como margen arriba y su negativo abajo:
+            // la tarjeta se corre sin empujar a las demás fuera de su ranura,
+            // que es lo que hace legible el reordenamiento en vivo.
+            cards.push(
+                item.mt(px(card.offset_y))
+                    .mb(px(-card.offset_y))
+                    .into_any_element(),
+            );
         }
     }
-    let spaces_list = div().flex().flex_col().gap(px(CARD_GAP)).children(cards);
+
+    // El contenedor es relativo para que la tarjeta arrastrada se ancle a él, y
+    // va al final para pintarse sobre las demás.
+    let spaces_list = div()
+        .relative()
+        .flex()
+        .flex_col()
+        .gap(px(CARD_GAP))
+        .children(cards)
+        .children(dragged_card);
 
     // ── Sección AGENTS ──────────────────────────────────────────────────
     // Lista de subagentes de pi, en vivo. Los vivos van arriba y llevan el
@@ -649,6 +672,20 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .w(px(6000.0))
             .cursor_col_resize()
             .on_mouse_move(move |event, window, _cx| {
+                // El botón pudo soltarse fuera de la ventana: si el puntero
+                // vuelve sin él, el gesto terminó y no hay nada que arrastrar.
+                if event.pressed_button != Some(MouseButton::Left) {
+                    if state_for_move
+                        .write()
+                        .unwrap()
+                        .resize_anchor_x
+                        .take()
+                        .is_some()
+                    {
+                        window.refresh();
+                    }
+                    return;
+                }
                 let x: f32 = event.position.x.into();
                 let mut s = state_for_move.write().unwrap();
                 // `resize_anchor_x` es None cuando el puntero no esta
@@ -678,6 +715,18 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .w(px(6000.0))
             .cursor_grabbing()
             .on_mouse_move(move |event, window, _cx| {
+                // Soltar el botón fuera de la ventana no siempre llega como
+                // `mouse_up`; el primer movimiento que vuelve sin el botón
+                // cierra el gesto en vez de dejarlo pegado.
+                if event.pressed_button != Some(MouseButton::Left) {
+                    let mut s = state_for_move.write().unwrap();
+                    if s.space_drag.is_some() {
+                        s.end_space_drag();
+                        drop(s);
+                        window.refresh();
+                    }
+                    return;
+                }
                 let y: f32 = event.position.y.into();
                 let changed = state_for_move.write().unwrap().move_space_drag(y);
                 if changed {

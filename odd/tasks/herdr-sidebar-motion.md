@@ -127,3 +127,26 @@ L5 (cambio de contrato declarado): el reordenamiento ya no muta `spaces` durante
 el gesto. Quien lea el orden de `spaces` a mitad de un arrastre ve el orden viejo
 hasta que el movimiento asienta (~300 ms). Ningún consumidor del repo lo hace:
 `layout_json` y los hooks leen la lista en reposo.
+
+L6 (verificación independiente, `gentle-ai-verify`, item 5 de riesgo declarado):
+S1–S5 cubiertos con evidencia; las 179 pruebas, clippy y fmt reproducidos por el
+verificador. Dos hallazgos:
+
+- **H1 (defecto real, preexistente y visible):** para pintar la tarjeta
+  arrastrada por encima de las demás se la movía al final de los hijos del
+  `flex_col`. Eso no cambia el orden de pintado sin el layout: la tarjeta se
+  dibujaba al pie de la lista. Medido en el commit base y en el candidato: con
+  tres espacios y la primera tarjeta agarrada, se pintaba en `y=155` mientras la
+  segunda estaba en `y=52`. Arreglado con un marcador del alto de la tarjeta en
+  su ranura y la arrastrada fuera del flujo (`absolute` con
+  `top = ranura * paso + desplazamiento`). Rojo obtenido antes del arreglo en
+  `la_tarjeta_arrastrada_conserva_su_ranura` (`155px no está encima de 52px`),
+  verde después.
+- **H2 (defensivo):** el `on_mouse_move` del arrastre no miraba
+  `event.pressed_button`. Si el botón se soltaba fuera de la ventana y el
+  compositor no entregaba el `mouse_up`, el gesto seguía vivo al volver el
+  puntero. Ahora el primer movimiento sin el botón izquierdo cierra el gesto (y
+  el del asidero de ancho suelta el ancla).
+
+L7 (re-verificación tras la corrección): 179 pruebas verdes, clippy sin
+advertencias propias, `cargo fmt -- --check` limpio en la caja `instabox port`.
