@@ -20,7 +20,7 @@ use port_plugin_api::LayoutHook;
 use port_term_core::pty::RunningApp;
 
 use crate::anim::{CARD_HEIGHT, CARD_PITCH};
-use crate::state::{HerdrSpace, HerdrTab};
+use crate::state::{HerdrSpace, HerdrTab, SPACE_DRAG_THRESHOLD};
 use crate::tests::{empty_presence, seed_watch_agent_with};
 use crate::{HerdrPlugin, SIDEBAR_DEFAULT_WIDTH};
 
@@ -354,6 +354,62 @@ async fn las_tarjetas_miden_un_paso_exacto(cx: &mut TestAppContext) {
             par[1]
         );
     }
+}
+
+/// Mientras se arrastra una tarjeta, su ranura en el layout no cambia.
+///
+/// Pintarla por encima de las demás no puede hacerse moviéndola al final de los
+/// hijos del `flex_col`: eso la saca de su ranura y la dibuja al pie de la
+/// lista, debajo de todas. Se comprueba midiendo: con el arrastre activo, la
+/// primera tarjeta sigue encima de la segunda, a un paso exacto.
+#[gpui::test]
+async fn la_tarjeta_arrastrada_conserva_su_ranura(cx: &mut TestAppContext) {
+    let presence = empty_presence("layout-arrastre-ranura");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    {
+        let mut s = plugin.state.write().unwrap();
+        let tabs = s.spaces[0].tabs.clone();
+        s.spaces[0] = espacio(1, "space-1", "main", tabs);
+        for id in 2..=3 {
+            s.spaces
+                .push(espacio(id, &format!("space-{id}"), "main", Vec::new()));
+        }
+        // Se asienta la entrada de las tarjetas para medir sólo el arrastre.
+        s.step_space_motion(crate::agents::now_ms() + 5_000);
+        // Arrastre de la primera tarjeta, apenas cruzado el umbral: la ranura
+        // destino sigue siendo la suya y las vecinas no se mueven.
+        s.begin_space_drag(1, 100.0);
+        s.move_space_drag(100.0 + SPACE_DRAG_THRESHOLD + 1.0);
+    }
+
+    let plugin = Rc::new(plugin);
+    let barra = Rc::clone(&plugin);
+    let bounds = medir_en_vista(
+        cx,
+        move || barra.left_sidebar().expect("la barra lateral se pinta"),
+        &[PANEL_LATERAL, TARJETA_0, TARJETA_1, TARJETA_2],
+    );
+
+    assert_eq!(
+        bounds[1].size.height,
+        px(CARD_HEIGHT),
+        "la tarjeta arrastrada cambió de alto"
+    );
+    assert!(
+        bounds[1].top() < bounds[2].top(),
+        "la tarjeta arrastrada se dibujó fuera de su ranura: {} no está encima de {}",
+        bounds[1].top(),
+        bounds[2].top()
+    );
+    // Su ranura es la primera: la distancia a la siguiente tarjeta es un paso.
+    // El puntero acaba de cruzar el umbral, así que el resorte todavía no movió
+    // la tarjeta más que unos pocos píxeles; lo que se mide es que la ranura no
+    // cambió, no la posición exacta del resorte.
+    let pitch: f32 = (bounds[2].top() - bounds[1].top()).into();
+    assert!(
+        pitch > 0.0 && pitch <= CARD_PITCH + 1.0,
+        "la tarjeta arrastrada no está a un paso de la siguiente: {pitch} px"
+    );
 }
 
 /// Una tarjeta con un agente en estado `Blocked` pinta su marcador de atención
