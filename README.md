@@ -142,11 +142,23 @@ Notable behaviour:
   and subtle highlight when a task finishes unseen. Clicking a space that
   needs attention switches to the space and directly focuses the tab requiring
   it (first the blocked one waiting for reply, then the finished one).
-- Space cards can be dragged with the mouse to reorder them: the dragged card
-  follows the pointer with a lifted shadow, its neighbours slide into place
-  instead of jumping, and it settles softly on release (releasing without
-  moving still selects as before). New tabs inherit the folder of their
-  space's active tab.
+- Space cards can be dragged with the mouse to reorder them. The list is not
+  touched while you drag: the new order is applied once the movement settles, so
+  the active space, the terminal and its springs never change owner
+  mid-gesture. The dragged card follows the pointer with a lifted shadow, its
+  neighbours slide one full slot instead of jumping, and it settles softly on
+  release. Releasing without moving still selects as before. New tabs inherit the
+  folder of their space's active tab.
+- Movement runs on [`gpui-ce-motion`](https://github.com/1bye/gpui-motion) using
+  its portable features only (`default-features = false`): the crate's GPUI
+  adapters target a different copy of GPUI, so the plugin samples springs and
+  curves with the host's render clock. Card offsets, the active-space tint and
+  the drag lift are keyed by space id, so adding or closing a space never
+  displaces another card.
+- Because it is compiled into PORT, a dependency added here also changes PORT's
+  `Cargo.lock` and the vendored hash in `flake.nix`. Run
+  `scripts/bump-port-plugins.sh` in the PORT checkout (it rewrites both) before
+  `nixos-rebuild`.
 
 ### `close-guard`
 
