@@ -146,11 +146,24 @@ Comportamiento destacado:
   en un espacio con atención, la terminal no solo cambia al espacio sino que
   selecciona directamente la pestaña que la requiere (primero la que espera
   respuesta y luego la que terminó).
-- Las tarjetas de espacio se arrastran con el clic para reordenarlas: la
-  tarjeta arrastrada sigue al puntero con una sombra de levantado, las vecinas
-  se deslizan a su lugar en vez de saltar y la tarjeta asienta suave al
-  soltar (al soltar sin mover, selecciona como antes). Las pestañas nuevas
-  heredan la carpeta de la pestaña activa de su espacio.
+- Las tarjetas de espacio se arrastran con el clic para reordenarlas. La lista no
+  se toca mientras se arrastra: el orden nuevo se aplica cuando el movimiento
+  asienta, así que el espacio activo, la terminal y los resortes no cambian de
+  dueño a mitad del gesto. La tarjeta arrastrada sigue al puntero con una sombra
+  de levantado, las vecinas se deslizan una ranura completa en vez de saltar y la
+  tarjeta asienta suave al soltar. Al soltar sin mover, selecciona como antes.
+  Las pestañas nuevas heredan la carpeta de la pestaña activa de su espacio.
+- El movimiento corre sobre [`gpui-ce-motion`](https://github.com/1bye/gpui-motion)
+  usando solo sus rasgos portables (`default-features = false`): los adaptadores
+  de GPUI del crate apuntan a otra copia de GPUI, así que el plugin muestrea
+  resortes y curvas con el reloj del render del anfitrión. El desplazamiento de
+  cada tarjeta, el tinte del espacio activo y el realce de levantado están
+  indexados por id de espacio, así que crear o cerrar un espacio no desplaza a
+  ninguna otra tarjeta.
+- Como se compila dentro de PORT, una dependencia agregada acá también cambia el
+  `Cargo.lock` de PORT y el hash de vendorización de `flake.nix`. Antes de
+  `nixos-rebuild`, correr `scripts/bump-port-plugins.sh` en el checkout de PORT
+  (reescribe los dos).
 
 ### `close-guard`
 
