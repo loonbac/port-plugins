@@ -10,7 +10,7 @@ use port_plugin_api::AgentState;
 use port_term_core::frame::Rgb;
 use port_term_core::pty::RunningApp;
 
-use crate::anim::Spring;
+use crate::anim::{drop_slot, reordered, CardInput, CardMotion, SpaceFrame, CARD_PITCH};
 use crate::color::system_accent_color;
 use crate::report::{ReportError, ReportRequest};
 
@@ -87,6 +87,14 @@ pub const SIDEBAR_MAX_WIDTH: f32 = 520.0;
 /// Definición de un espacio de trabajo en Herdr.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrSpace {
+    /// Identidad estable del espacio.
+    ///
+    /// Es la clave del movimiento de su tarjeta y del gesto de reordenamiento.
+    /// Nunca se reutiliza: un espacio cerrado no vuelve a existir. Antes la
+    /// identidad era el índice en la lista, y por eso cerrar un espacio
+    /// intermedio desplazaba la tarjeta equivocada y arrastrar uno cambiaba de
+    /// lugar a otro.
+    pub id: usize,
     pub name: String,
     pub branch: String,
     pub custom_color: Option<Rgb>,
@@ -99,52 +107,30 @@ pub struct HerdrSpace {
 /// Por debajo no pasa nada hasta el `mouse_up`: así un clic normal sigue
 /// seleccionando al soltar, igual que antes.
 pub(crate) const SPACE_DRAG_THRESHOLD: f32 = 6.0;
-/// Paso vertical estimado entre tarjetas de espacio (altura + separación), en píxeles.
-///
-/// Es una estimación porque el plugin no mide el layout (GPUI no lo expone a
-/// los plugins): basta porque el ancla se recentra en cada intercambio y el
-/// error solo cambia ligeramente la sensibilidad del arrastre.
-pub(crate) const SPACE_CARD_PITCH: f32 = 45.0;
 
 /// Arrastre de reordenamiento de espacios en curso, si lo hay.
-#[derive(Debug, Clone, Copy)]
+///
+/// No toca la lista: guarda qué espacio se agarró, dónde estaba el puntero y a
+/// qué ranura iría si se soltara. El orden nuevo se aplica al soltar, cuando los
+/// resortes ya asentaron, así que nada más ve una lista a medio reordenar.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct SpaceDrag {
-    /// Posición actual de la tarjeta arrastrada dentro de `spaces`.
-    pub index: usize,
-    /// Coordenada Y donde empezó el tramo actual (se recentra en cada intercambio).
-    pub anchor_y: f32,
+    /// Id del espacio que se arrastra.
+    pub id: usize,
+    /// Ranura visual que ocupaba su tarjeta al agarrarla.
+    pub grab_slot: usize,
+    /// Coordenada Y del puntero al agarrar, en coordenadas de ventana.
+    pub grab_y: f32,
     /// Última coordenada Y del puntero, para dibujar la tarjeta siguiéndolo.
     pub pointer_y: f32,
+    /// Ranura visual a la que iría si se soltara ahora.
+    pub target: usize,
     /// `true` en cuanto el puntero superó el umbral: ya no es un clic.
     pub moved: bool,
 }
 
-/// Rigidez del resorte que sigue al puntero mientras se arrastra.
-///
-/// Alta a propósito: la tarjeta debe sentirse pegada al cursor, no flotando
-/// detrás. El resorte solo aporta un retardo mínimo que suaviza los saltos
-/// del puntero entre eventos.
-const DRAG_STIFFNESS: f32 = 900.0;
-/// Rigidez del resorte que desliza a las vecinas y asienta la tarjeta soltada.
-///
-/// Más blanda, para que el reacomodo se lea como movimiento y no como un salto.
-const SHIFT_STIFFNESS: f32 = 320.0;
-/// Duración del realce de levantado, en milisegundos.
-const LIFT_MS: f32 = 140.0;
-
-/// Animación de las tarjetas de espacio, en píxeles de desplazamiento.
-///
-/// Vive aparte del arrastre porque sobrevive a él: cuando se suelta la tarjeta
-/// el arrastre ya terminó pero el resorte sigue acomodándola.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct SpaceMotion {
-    /// Un resorte por tarjeta, en el mismo orden que `spaces`.
-    pub springs: Vec<Spring>,
-    /// Realce de levantado de la tarjeta arrastrada, de 0 a 1.
-    pub lift: f32,
-    /// Momento del último cuadro simulado, para calcular el paso de tiempo.
-    pub last_frame_ms: Option<u64>,
-}
+/// Orden pendiente de aplicar, como ids de espacio en su orden final.
+pub(crate) type PendingOrder = Vec<usize>;
 
 impl HerdrSpace {
     /// Corrige `active_tab_index` después de quitar pestañas del espacio.
@@ -426,7 +412,10 @@ fn report_seen(state: AgentState) -> bool {
 }
 
 /// Estado interno del plugin Herdr.
-#[derive(Debug, Clone)]
+///
+/// No es `Clone`: el movimiento de las tarjetas es estado retenido (trayectorias
+/// con velocidad), y duplicarlo daría dos animaciones del mismo objeto.
+#[derive(Debug)]
 pub struct HerdrState {
     pub active_space_index: usize,
     pub spaces: Vec<HerdrSpace>,
@@ -476,6 +465,8 @@ pub struct HerdrState {
     pub(crate) resize_start_width: f32,
     pub(crate) next_tab_id: usize,
     pub(crate) next_space_num: usize,
+    /// Próximo id de espacio. No se reutiliza nunca (ver `HerdrSpace::id`).
+    pub(crate) next_space_id: usize,
     /// Color de acento publicado por el hilo de fondo para lecturas de memoria puras sin E/S.
     pub published_accent: Rgb,
     /// Indica que el modo de acento cambió y debe republicarse pronto.
@@ -497,14 +488,19 @@ pub struct HerdrState {
     /// Arrastre de reordenamiento en curso. Mientras está presente, la sidebar
     /// muestra una capa que sigue al puntero hasta el `mouse_up`.
     pub(crate) space_drag: Option<SpaceDrag>,
-    /// Resortes y realce de las tarjetas de espacio: el movimiento que se ve
-    /// mientras se arrastra y después de soltar.
-    pub(crate) space_motion: SpaceMotion,
+    /// Orden nuevo acordado al soltar, a la espera de que los resortes asienten.
+    pub(crate) pending_order: Option<PendingOrder>,
+    /// Movimiento de las tarjetas de espacio: el desplazamiento que se ve
+    /// mientras se arrastra, después de soltar y al entrar una tarjeta nueva.
+    pub(crate) space_motion: CardMotion,
+    /// Último fotograma calculado, que es lo que pinta el render.
+    pub(crate) card_frame: SpaceFrame,
 }
 
 /// Espacio inicial: una sola terminal llamada `terminal` sobre la sesión 0.
 pub(crate) fn default_space() -> HerdrSpace {
     HerdrSpace {
+        id: 1,
         name: "space-1".to_string(),
         branch: "main".to_string(),
         custom_color: None,
@@ -752,154 +748,221 @@ impl HerdrState {
 }
 
 impl HerdrState {
-    /// Inicia el posible arrastre de la tarjeta `index` en la coordenada Y dada.
+    /// Acuña un id nuevo de espacio.
+    ///
+    /// Los ids no se reutilizan: un espacio cerrado no vuelve a existir, ni
+    /// siquiera mientras su tarjeta termina de salir de la lista.
+    pub(crate) fn allocate_space_id(&mut self) -> usize {
+        let id = self.next_space_id;
+        self.next_space_id += 1;
+        id
+    }
+
+    /// Índice actual del espacio con ese id dentro de `spaces`.
+    pub(crate) fn space_index_of(&self, id: usize) -> Option<usize> {
+        self.spaces.iter().position(|space| space.id == id)
+    }
+
+    /// Ids de los espacios, en el orden de la lista.
+    fn space_ids(&self) -> Vec<usize> {
+        self.spaces.iter().map(|space| space.id).collect()
+    }
+
+    /// Orden que se está viendo: el pendiente de aplicar si lo hay.
+    ///
+    /// Al soltar un arrastre el orden nuevo se ve en el acto (los resortes ya lo
+    /// dibujan) pero la lista se mueve recién cuando el movimiento asienta. Todo
+    /// lo que razona sobre ranuras —el gesto y el motor de movimiento— trabaja
+    /// con este orden, no con el de la lista.
+    fn effective_order(&self) -> Vec<usize> {
+        self.pending_order
+            .clone()
+            .unwrap_or_else(|| self.space_ids())
+    }
+
+    /// Inicia el posible arrastre de la tarjeta `id` en la coordenada Y dada.
     ///
     /// Todavía no selecciona ni mueve nada: si el puntero no supera el umbral,
-    /// `end_space_drag` lo tratará como un clic normal.
-    pub(crate) fn begin_space_drag(&mut self, index: usize, y: f32) {
-        if index < self.spaces.len() {
-            self.sync_space_springs();
-            self.space_drag = Some(SpaceDrag {
-                index,
-                anchor_y: y,
-                pointer_y: y,
-                moved: false,
-            });
-        }
+    /// `end_space_drag` lo tratará como un clic normal. El espacio se resuelve
+    /// por id, así que un índice viejo no puede agarrar otra tarjeta.
+    pub(crate) fn begin_space_drag(&mut self, id: usize, y: f32) {
+        let Some(grab_slot) = self.effective_order().iter().position(|other| *other == id) else {
+            return;
+        };
+        self.space_drag = Some(SpaceDrag {
+            id,
+            grab_slot,
+            grab_y: y,
+            pointer_y: y,
+            target: grab_slot,
+            moved: false,
+        });
     }
 
-    /// Deja un resorte por tarjeta, en el mismo orden que `spaces`.
+    /// Avanza el arrastre a la coordenada Y indicada y calcula la ranura destino.
     ///
-    /// Se llama antes de animar: crear o cerrar espacios cambia la lista y los
-    /// resortes tienen que seguirla para no desplazar a la tarjeta equivocada.
-    fn sync_space_springs(&mut self) {
-        self.space_motion
-            .springs
-            .resize(self.spaces.len(), Spring::new());
-    }
-
-    /// Avanza el arrastre a la coordenada Y indicada, intercambiando la tarjeta
-    /// con sus vecinas al cruzar medio paso y siguiendo al espacio activo.
+    /// Devuelve `true` si hay que repintar: mientras la tarjeta se arrastra,
+    /// cada evento del puntero cambia su posición aunque la ranura destino sea la
+    /// misma.
     ///
-    /// Devuelve `true` si algo cambió (inicio del arrastre o algún intercambio)
-    /// y hay que repintar.
+    /// La ranura se calcula desde el puntero y el punto de agarre, sin acumular
+    /// nada entre llamadas: repetir la misma posición da la misma ranura y un
+    /// evento perdido no descoloca el gesto.
     pub(crate) fn move_space_drag(&mut self, y: f32) -> bool {
         let Some(mut drag) = self.space_drag else {
             return false;
         };
+        // La ranura de reposo se recalcula por id: si la lista cambió por debajo
+        // (se cerró un espacio anterior), el ancla se corre con la tarjeta para
+        // que el desplazamiento siga midiendo lo mismo.
+        let Some(slot) = self
+            .effective_order()
+            .iter()
+            .position(|other| *other == drag.id)
+        else {
+            // El espacio desapareció: el gesto ya no tiene dueño.
+            self.space_drag = None;
+            return true;
+        };
+        if slot != drag.grab_slot {
+            drag.grab_y += (slot as f32 - drag.grab_slot as f32) * CARD_PITCH;
+            drag.grab_slot = slot;
+        }
         drag.pointer_y = y;
-        if !drag.moved && (y - drag.anchor_y).abs() < SPACE_DRAG_THRESHOLD {
+        if !drag.moved && (y - drag.grab_y).abs() < SPACE_DRAG_THRESHOLD {
             self.space_drag = Some(drag);
             return false;
         }
         drag.moved = true;
-        self.sync_space_springs();
-        while y - drag.anchor_y > SPACE_CARD_PITCH / 2.0 && drag.index + 1 < self.spaces.len() {
-            self.swap_space_slots(drag.index, drag.index + 1);
-            drag.index += 1;
-            drag.anchor_y += SPACE_CARD_PITCH;
-        }
-        while y - drag.anchor_y < -SPACE_CARD_PITCH / 2.0 && drag.index > 0 {
-            self.swap_space_slots(drag.index, drag.index - 1);
-            drag.index -= 1;
-            drag.anchor_y -= SPACE_CARD_PITCH;
-        }
+        drag.target = drop_slot(drag.grab_slot, y - drag.grab_y, self.spaces.len());
         self.space_drag = Some(drag);
         true
     }
 
-    /// Intercambia dos tarjetas y prepara el movimiento de la que no se arrastra.
+    /// Termina el arrastre: un clic selecciona, un arrastre deja el orden nuevo
+    /// pendiente y selecciona la tarjeta soltada.
     ///
-    /// La tarjeta que llega a la ranura nueva arranca visualmente donde estaba
-    /// (un paso de distancia) y el resorte la lleva a su lugar, así el reacomodo
-    /// se lee como deslizamiento y no como salto. La arrastrada se excluye: esa
-    /// sigue al puntero, no a su ranura.
-    fn swap_space_slots(&mut self, a: usize, b: usize) {
-        let dragged = self.space_drag.map(|drag| drag.index);
-        self.spaces.swap(a, b);
-        self.space_motion.springs.swap(a, b);
-
-        // La tarjeta que sube (va a un índice menor) entra desde abajo y la que
-        // baja entra desde arriba; el signo del arranque conserva esa lectura.
-        let pitch = SPACE_CARD_PITCH;
-        let shift = |from: usize, to: usize| if to > from { -pitch } else { pitch };
-        // El arrastre trabaja con los índices de antes del intercambio; hay que
-        // saber dónde queda su resorte para no desplazarlo a él.
-        let dragged_after = match dragged {
-            Some(d) if d == a => Some(b),
-            Some(d) if d == b => Some(a),
-            other => other,
-        };
-        if dragged_after != Some(a) {
-            self.space_motion.springs[a].place(shift(b, a));
-        }
-        if dragged_after != Some(b) {
-            self.space_motion.springs[b].place(shift(a, b));
-        }
-
-        if self.active_space_index == a {
-            self.active_space_index = b;
-        } else if self.active_space_index == b {
-            self.active_space_index = a;
-        }
-    }
-
-    /// Termina el arrastre: selecciona la tarjeta arrastrada (haya sido clic o
-    /// soltado tras mover) y limpia el estado. Conserva el salto a la pestaña
-    /// con atención del clic normal.
+    /// La lista no se toca acá. El orden nuevo se ve en el acto porque los
+    /// resortes lo dibujan, y se aplica cuando el movimiento asienta (ver
+    /// `step_space_motion`): mover la lista a mitad del gesto es lo que hacía que
+    /// el espacio activo y los resortes cambiaran de dueño mientras se
+    /// arrastraba.
     pub(crate) fn end_space_drag(&mut self) {
-        if let Some(drag) = self.space_drag.take() {
-            self.select_space_with_attention(drag.index);
+        let Some(drag) = self.space_drag.take() else {
+            return;
+        };
+        let Some(index) = self.space_index_of(drag.id) else {
+            return;
+        };
+        if drag.moved {
+            let effective = self.effective_order();
+            if let Some(from) = effective.iter().position(|id| *id == drag.id) {
+                if drag.target != from {
+                    let order = reordered(&effective, from, drag.target);
+                    if order != self.space_ids() {
+                        self.pending_order = Some(order);
+                    }
+                }
+            }
         }
+        self.select_space_with_attention(index);
     }
 
-    /// Avanza la animación de las tarjetas hasta `now_ms` y responde si algo se
-    /// sigue moviendo (para pedir otro cuadro).
-    pub(crate) fn step_space_motion(&mut self, now_ms: u64) -> bool {
-        self.sync_space_springs();
-        let dt_s = match self.space_motion.last_frame_ms {
-            Some(prev) => now_ms.saturating_sub(prev) as f32 / 1000.0,
-            None => 1.0 / 60.0,
+    /// Aplica el orden pendiente y realinea los resortes con la lista nueva.
+    ///
+    /// Solo se llama cuando el movimiento ya asentó: en ese momento cada tarjeta
+    /// está visualmente en su ranura nueva, así que descartar los resortes es
+    /// exacto y no hay salto. El espacio activo se resuelve por id, de modo que
+    /// reordenar no cambia cuál está en pantalla.
+    fn apply_pending_order(&mut self) {
+        let Some(order) = self.pending_order.take() else {
+            return;
         };
-        self.space_motion.last_frame_ms = Some(now_ms);
-
-        // El realce de levantado sube de golpe al empezar el arrastre y baja al
-        // soltar; no persigue una posición, así que basta una curva.
-        let lift_target = if self.space_drag.is_some_and(|drag| drag.moved) {
-            1.0
-        } else {
-            0.0
-        };
-        let lift_step = (dt_s * 1000.0 / LIFT_MS).min(1.0);
-        let lift = self.space_motion.lift;
-        self.space_motion.lift = if lift_target > lift {
-            (lift + lift_step).min(1.0)
-        } else {
-            (lift - lift_step).max(0.0)
-        };
-
-        // Objetivo de cada tarjeta: la arrastrada persigue al puntero, el resto
-        // vuelve a su ranura.
-        let dragged = self.space_drag.filter(|drag| drag.moved);
-        let mut moving = (self.space_motion.lift - lift_target).abs() > 0.001;
-        for (i, spring) in self.space_motion.springs.iter_mut().enumerate() {
-            let (target, stiffness) = match dragged {
-                Some(drag) if drag.index == i => (drag.pointer_y - drag.anchor_y, DRAG_STIFFNESS),
-                _ => (0.0, SHIFT_STIFFNESS),
-            };
-            moving |= spring.step(target, dt_s, stiffness);
-        }
-        moving
-    }
-
-    /// `true` mientras la animación de tarjetas no está en reposo.
-    pub(crate) fn space_motion_active(&self) -> bool {
-        self.space_motion.lift > 0.001
-            || self
-                .space_motion
-                .springs
+        let active_id = self
+            .spaces
+            .get(self.active_space_index)
+            .map(|space| space.id);
+        let mut rest: Vec<Option<HerdrSpace>> = self.spaces.drain(..).map(Some).collect();
+        let mut arranged = Vec::with_capacity(rest.len());
+        for id in order {
+            let slot = rest
                 .iter()
-                .any(|spring| spring.value() != 0.0)
+                .position(|space| space.as_ref().is_some_and(|space| space.id == id));
+            if let Some(space) = slot.and_then(|slot| rest[slot].take()) {
+                arranged.push(space);
+            }
+        }
+        // Defensivo: un espacio que el orden no nombraba (nació durante el gesto)
+        // se queda al final en vez de desaparecer.
+        arranged.extend(rest.into_iter().flatten());
+        self.spaces = arranged;
+        self.active_space_index = active_id
+            .and_then(|id| self.space_index_of(id))
+            .unwrap_or(0);
+        self.space_motion.rebase();
+    }
+
+    /// Lo que el motor de movimiento necesita saber de la lista actual.
+    ///
+    /// Las ranuras se miden contra el orden efectivo (el pendiente si lo hay):
+    /// así el desplazamiento de cada tarjeta incluye tanto el reordenamiento ya
+    /// acordado como el arrastre en curso.
+    fn card_inputs(&self) -> Vec<CardInput> {
+        let effective = self.effective_order();
+        let slot_of = |id: usize, order: &[usize]| order.iter().position(|other| *other == id);
+        let drag = self.space_drag.filter(|drag| drag.moved);
+        let settled_order = match drag {
+            Some(drag) => {
+                let from = slot_of(drag.id, &effective).unwrap_or(drag.target);
+                reordered(&effective, from, drag.target)
+            }
+            None => effective.clone(),
+        };
+        self.spaces
+            .iter()
+            .enumerate()
+            .map(|(index, space)| {
+                let start = slot_of(space.id, &effective).unwrap_or(index);
+                let end = slot_of(space.id, &settled_order).unwrap_or(index);
+                let drag_offset = drag.filter(|drag| drag.id == space.id).map(|drag| {
+                    // El puntero se suma a la ranura que la tarjeta ya ocupaba:
+                    // si venía de un orden pendiente, arrancar de cero la
+                    // teletransportaría a su índice de lista.
+                    (start as f32 - index as f32) * CARD_PITCH + (drag.pointer_y - drag.grab_y)
+                });
+                CardInput {
+                    id: space.id,
+                    active: index == self.active_space_index,
+                    drag_offset,
+                    slot_delta: end as i32 - index as i32,
+                }
+            })
+            .collect()
+    }
+
+    /// Avanza un cuadro de la barra lateral y responde si queda algo en
+    /// movimiento (es lo que mantiene los cuadros fluyendo).
+    pub(crate) fn step_space_motion(&mut self, now_ms: u64) -> bool {
+        let lifting = self.space_drag.is_some_and(|drag| drag.moved);
+        let inputs = self.card_inputs();
+        let mut frame = self.space_motion.sample(now_ms, &inputs, lifting, false);
+        // Con los resortes quietos, el orden acordado ya no tiene nada que
+        // dibujar: se aplica a la lista y los resortes se realinean.
+        if !frame.animating && self.space_drag.is_none() && self.pending_order.is_some() {
+            self.apply_pending_order();
+            let inputs = self.card_inputs();
+            frame = self.space_motion.sample(now_ms, &inputs, lifting, false);
+        }
+        self.card_frame = frame;
+        self.card_frame.animating
+    }
+
+    /// `true` mientras haya movimiento que dibujar o un orden por aplicar.
+    ///
+    /// El orden pendiente cuenta aunque los resortes ya estén quietos: hay que
+    /// pedir un cuadro para que `step_space_motion` lo aplique a la lista.
+    pub(crate) fn space_motion_active(&self) -> bool {
+        self.card_frame.animating || self.pending_order.is_some()
     }
 
     /// Entorno que se anuncia al panel que está por lanzarse.
@@ -969,20 +1032,7 @@ impl Default for HerdrState {
         Self {
             // Inicialmente 1 espacio limpio: la terminal abre pura a pantalla completa
             active_space_index: 0,
-            spaces: vec![HerdrSpace {
-                name: "space-1".to_string(),
-                branch: "main".to_string(),
-                custom_color: None,
-                tabs: vec![HerdrTab {
-                    id: 1,
-                    title: "terminal".to_string(),
-                    session_id: 0,
-                    app: None,
-                    title_locked: false,
-                    watching: None,
-                }],
-                active_tab_index: 0,
-            }],
+            spaces: vec![default_space()],
             // Sin fondo propio: la sidebar y el topbar comparten el fondo de
             // la ventana y su transparencia, como la terminal.
             opacity: 0.0,
@@ -1000,6 +1050,7 @@ impl Default for HerdrState {
             resize_start_width: SIDEBAR_DEFAULT_WIDTH,
             next_tab_id: 2,
             next_space_num: 2,
+            next_space_id: 2,
             published_accent: system_accent_color(),
             accent_stale: false,
             last_accent_fetch_ms: crate::agents::now_ms(),
@@ -1007,7 +1058,9 @@ impl Default for HerdrState {
             git_branch_cache: HashMap::new(),
             agents: HashMap::new(),
             space_drag: None,
-            space_motion: SpaceMotion::default(),
+            pending_order: None,
+            space_motion: CardMotion::default(),
+            card_frame: SpaceFrame::default(),
             panel_reports: PanelReports::default(),
             pending_panel: None,
             panel_env: PanelEnv::default(),

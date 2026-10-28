@@ -45,16 +45,16 @@ impl LayoutHook for HerdrPlugin {
         topbar::top_bar(self)
     }
 
-    /// Pide cuadros continuos solo mientras haya un marcador animado a la
-    /// vista: `Working` (spinner) o `Blocked` (parpadeo). Sin sidebar o sin
-    /// esos estados, la ventana vuelve a repintar solo a demanda.
+    /// Pide cuadros continuos solo mientras haya algo que mover a la vista.
+    ///
+    /// Cuenta el movimiento de las tarjetas (el arrastre, el reacomodo al
+    /// soltar y la entrada de una tarjeta nueva) y los marcadores animados
+    /// `Working` (spinner) o `Blocked` (parpadeo). Sin nada de eso, la ventana
+    /// vuelve a repintar solo a demanda: pedir cuadros por tener un gesto abierto
+    /// dejaba la ventana a 60 fps mientras el usuario no movía nada.
     fn needs_animation(&self) -> bool {
         let s = self.state.read().unwrap();
-        // Arrastrando una tarjeta, los cuadros deben seguir fluyendo para el
-        // reordenamiento en vivo y el resaltado. Y aunque el arrastre haya
-        // terminado, los resortes siguen acomodando las tarjetas: sin cuadros
-        // se quedarían congeladas a mitad de camino.
-        if s.space_drag.is_some() || s.space_motion_active() {
+        if s.space_motion_active() {
             return true;
         }
         if !self.sidebar_shown(&s) {
