@@ -131,7 +131,10 @@ Notable behaviour:
   `claude`, `antigravity`, `opencode`, `gemini`, `btop`, …).
 - Spaces adopt the name of the folder you are in and the active Git branch.
 - Sidebar and tab bar share the terminal background and opacity, and pick up the
-  accent colour extracted from your wallpaper.
+  accent colour extracted from your wallpaper. PORT paints that background behind
+  the chrome — the same layer as the grid — so the panel is never a hole onto the
+  desktop; the `opacity` setting is an extra veil on top of it (`0`, the default,
+  looks exactly like the terminal).
 - The sidebar edge is draggable to resize it.
 - Long folder names, branch names and tab titles are truncated with `…` instead
   of overflowing the sidebar or the tab bar. The new-tab button stays at the
