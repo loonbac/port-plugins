@@ -189,3 +189,19 @@ compila herdr desde el checkout hermano por el `[patch]` local de
 `herdr-layout-cwd` (previo al arreglo): la versión que dibuja la tarjeta arrastrada
 al pie de la lista. El defecto ya está corregido en `master` (`642be40`) y la
 prueba de T8 lo fija en código.
+L11 (el arreglo anterior no funcionaba, y cómo se supo): el envoltorio de cromo que
+se agregó al armazón pintaba **nada**. En un `flex_row` un `div()` sin ancho se mide
+en 0 px, así que su fondo cubría cero columnas mientras el hijo del plugin seguía
+dibujando sus 236 px. Se vio al medir en el compositor real (niri, no headless): el
+panel salía `srgba(0,0,0,0)` al lado de la rejilla `srgba(11,14,20,0.85)`, y un
+`gpui::red()` temporal en el mismo punto probó que el envoltorio estaba inerte, no
+mal calculado. Arreglado dándole el ancho que el armazón ya reserva (`left_inset`);
+después el panel, la rejilla y la barra superior miden lo mismo:
+`srgba(11,14,20,0.85098)`.
+
+Dos lecciones para estas pruebas: el banco headless con `WLR_RENDERER=pixman` compone
+la ventana **opaca**, así que no sirve para nada que dependa de alfa (el mismo banco
+con `foot` y `colors.alpha=0.5` sí lo compone, o sea el compositor podía: era la
+superficie de PORT la que salía opaca); y una prueba unitaria del color calculado
+pasa igual cuando el elemento tiene área cero, que es exactamente el defecto que se
+coló. En `port`: issue #12, PR #13.
