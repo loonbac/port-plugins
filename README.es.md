@@ -133,7 +133,10 @@ Comportamiento destacado:
   (`pi`, `codex`, `claude`, `antigravity`, `opencode`, `gemini`, `btop`, …).
 - Los espacios adoptan el nombre de la carpeta actual y la rama de Git activa.
 - La barra lateral y la barra de pestañas comparten el fondo y la opacidad de la
-  terminal, y toman el color de acento extraído del wallpaper.
+  terminal, y toman el color de acento extraído del wallpaper. Ese fondo lo pinta
+  PORT detrás del cromo —la misma capa que la rejilla—, así que el panel nunca es
+  un hueco al escritorio; el ajuste `opacity` es un velo extra encima (`0`, el
+  default, se ve exactamente como la terminal).
 - El borde de la barra lateral se puede arrastrar para cambiar su ancho.
 - Los nombres de carpeta, ramas y títulos de pestaña largos se recortan con `…`
   en vez de desbordar la barra lateral o la de pestañas. El botón de nueva

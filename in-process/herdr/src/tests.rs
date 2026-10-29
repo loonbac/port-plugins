@@ -2637,6 +2637,43 @@ fn el_arrastre_es_idempotente() {
     );
 }
 
+/// Cruzar una ranura no manda la tarjeta arrastrada al pie de la lista.
+///
+/// Complementa a `la_tarjeta_arrastrada_sigue_al_puntero`, que mueve el puntero
+/// sin cruzar de ranura: acá la ranura destino ya es la siguiente, así que el
+/// desplazamiento mezcla los dos términos. Si se apilaran (ranura destino más
+/// arrastre, o mover la tarjeta al final de los hijos para pintarla encima), la
+/// tarjeta se iría al final y se perdería de vista con el puntero a media altura.
+#[test]
+fn la_tarjeta_arrastrada_no_se_va_al_pie_de_la_lista() {
+    let presence = empty_presence("drag-puntero");
+    let plugin = HerdrPlugin::with_presence_dir(&presence);
+    three_spaces(&plugin);
+    // Un paso y cuarto hacia abajo: la ranura destino es la siguiente, pero el
+    // puntero está más abajo que ella.
+    let delta = CARD_PITCH * 1.25;
+    plugin.state.write().unwrap().begin_space_drag(1, 100.0);
+    plugin.state.write().unwrap().move_space_drag(100.0 + delta);
+    asentar_animacion(&plugin);
+
+    let s = plugin.state.read().unwrap();
+    assert_eq!(
+        s.space_drag.map(|drag| drag.target),
+        Some(1),
+        "el puntero no cruzó la ranura siguiente"
+    );
+    let offset = s.card_frame.cards[0].offset_y;
+    drop(s);
+    assert!(
+        (offset - delta).abs() < 0.5,
+        "la tarjeta arrastrada no sigue al puntero: se corre {offset} y el puntero está a {delta}"
+    );
+    assert!(
+        offset < CARD_PITCH * 2.0,
+        "la tarjeta arrastrada se fue al pie de la lista: {offset}"
+    );
+}
+
 /// Un movimiento posterior al soltar no mueve nada: el gesto terminó.
 ///
 /// Es el defecto que se veía como «los spaces cambian de lado solos»: con el

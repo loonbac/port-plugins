@@ -471,7 +471,9 @@ impl Plugin for HerdrPlugin {
 
     fn default_config(&self) -> Option<PluginConfig> {
         let mut cfg = PluginConfig::new();
-        cfg.set("opacity", 0.85);
+        // 0 = el panel se ve como la terminal: el fondo lo pinta el armazón.
+        // Subirlo es una capa extra de tinte sobre ese fondo.
+        cfg.set("opacity", 0.0);
         cfg.set("accent", "auto");
         cfg.set("sidebar_width", SIDEBAR_DEFAULT_WIDTH);
         cfg.set("spaces", "");

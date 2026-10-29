@@ -22,6 +22,12 @@ pero no puedo explicartelo no se como».
 
 S5. «asi que tienes que analizar eeso y arrglarlo».
 
+S6. «todo lo que agrega es completamente transparente, tiene que tener la
+transparencia de la terminal no ser transparente, esta mal eso».
+
+S7. «ademas al intentar reordenar un space se va hasta abajo y no se ve bien la
+animacion».
+
 ## Diagnóstico (evidencia en el código, previo a los cambios)
 
 D1 · Gesto pegado (S1, S4). El `mouse_down` de una tarjeta escribe `space_drag` y
@@ -80,6 +86,13 @@ tarjetas nuevas ni del propio panel, y el ancho de la barra salta.
   `pitch == alto + separación` — commit `2f178d1` (178 pruebas verdes).
 - T6 · S5 · port-plugins · documentos: `README.md`/`README.es.md` del plugin con la
   dependencia nueva y el requisito de re-vendorizar en Nix — este commit.
+- T7 · S6 · port · propiedad del fondo del cromo: el armazón envuelve la barra
+  lateral, la superior y la inferior de un plugin en una capa con
+  `chrome_background(fondo_efectivo, opacidad_efectiva)`, la misma que pinta cada
+  celda de la rejilla; prueba unitaria del fondo en `view/paint.rs`.
+- T8 · S7 · port-plugins · prueba que fija que la tarjeta arrastrada sigue al
+  puntero (desplazamiento asentado igual al del puntero y menor que dos pasos) y
+  no al pie de la lista.
 
 ## Log
 
@@ -150,3 +163,29 @@ verificador. Dos hallazgos:
 
 L7 (re-verificación tras la corrección): 179 pruebas verdes, clippy sin
 advertencias propias, `cargo fmt -- --check` limpio en la caja `instabox port`.
+
+L8 (defecto reportado, verbatim): «ok, tengo un problema con el plugin de herd,
+todo lo que agrega es completamente transparente, tiene que tener la transparencia
+de la terminal no ser transparente, esta mal eso, de donde mierda sacaste que sea
+full transparente?, ademas al intentar reordenar un space se va hasta abajo y no
+se ve bien la animacion».
+
+L9 (diagnóstico de S6, evidencia): la raíz de la ventana no pinta fondo a
+propósito (`crates/port-app/src/view/mod.rs`, «Sin fondo propio: la opacidad de la
+ventana la lleva cada capa que se pinta en paint_frame») y la ventana se abre con
+`WindowBackgroundAppearance::Transparent`. La rejilla pinta cada celda con
+`cell_background(fondo_del_tema, opacidad_efectiva)`; el cromo de un plugin
+(`for sidebar in left_sidebars { root = root.child(sidebar) }`) no recibía ninguna
+capa. Con `opacity = 0` en la sección `herdr` de `~/.config/port/config.md` —lo
+que hay en esta máquina— el panel no pintaba nada y detrás no había nada: se veía
+el escritorio a través de toda la barra, las tarjetas y las tintas. El plugin no
+puede resolverlo solo: ni el fondo del tema ni la opacidad efectiva (que aporta el
+plugin `transparency`) están en el contrato del hook de layout, así que el fondo
+pertenece al armazón.
+
+L10 (diagnóstico de S7, evidencia): la construcción que el usuario tiene delante
+compila herdr desde el checkout hermano por el `[patch]` local de
+`~/Proyectos/port/Cargo.toml`, y ese checkout está en la rama de trabajo
+`herdr-layout-cwd` (previo al arreglo): la versión que dibuja la tarjeta arrastrada
+al pie de la lista. El defecto ya está corregido en `master` (`642be40`) y la
+prueba de T8 lo fija en código.

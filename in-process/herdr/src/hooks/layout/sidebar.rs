@@ -492,8 +492,13 @@ pub(super) fn left_sidebar(plugin: &HerdrPlugin) -> Option<AnyElement> {
             .collect::<Vec<_>>()
     };
 
-    // Fondo de la sidebar: con `opacity` en 0 (default) no pinta nada y
-    // se ve el fondo de la ventana, idéntico al de la terminal.
+    // Fondo de la sidebar: una capa opcional sobre el fondo que el armazón ya
+    // pinta detrás del cromo de un plugin (el mismo de la rejilla, con su
+    // opacidad). En 0 (default) el panel se ve exactamente como la terminal;
+    // subirlo lo tiñe con el fondo del tema —y componer dos capas translúcidas
+    // lo deja más opaco que el resto de la ventana—. El plugin no puede pintar
+    // el fondo de la aplicación: ni el color del tema ni la opacidad efectiva
+    // están en el contrato del hook de layout.
     let width = state_sidebar_width;
     let resizing = state_is_resizing;
     let sidebar = div()
