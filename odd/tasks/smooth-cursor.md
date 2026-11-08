@@ -273,6 +273,13 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L28** (handoff state): ownership is settled and nothing is pending on this side.
+PORT merges and tags; this repo bumps the pin; then the feature comes out; then the five
+registration sites. `smooth-cursor-review` stays frozen at the code commit `25012eb` and
+is never force-moved again: PORT verified the tag at three different shas while it was
+moving, which is the defect, not the identifier. Documentation commits (50b9e65,
+083878c) sit above the tag without changing the crate, verified by `git diff`.
+
 **L27** (ordering, agreed with PORT): wait for PORT's tag, then delete the `overlay-hook`
 feature and register **without** `features`. Sequence, so nobody registers a silent
 no-op:
