@@ -114,7 +114,15 @@ for key in port-plugin-herdr port-plugin-selection port-plugin-smooth-cursor; do
 
 `flake.nix` (`cargoLock.outputHashes`) lo reescribe el script: no editar a mano.
 
-## Sobre el feature `overlay-hook`
+## Sobre el feature `overlay-hook` (ya no existe)
+
+**Actualización:** PORT mergeó la rama a master en `afb2566`, así que el API con
+`OverlayHook` está publicado en la rama. El feature flag fue retirado del crate:
+`host.rs` se compila siempre. Usa `smooth-cursor-register` como referencia.
+
+Lo que sigue vale como historia de por qué existió el flag.
+
+---
 
 El crate de port-plugins publica el adaptador detrás de:
 
