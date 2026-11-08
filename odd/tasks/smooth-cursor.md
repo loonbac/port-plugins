@@ -273,6 +273,22 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L27** (ordering, agreed with PORT): wait for PORT's tag, then delete the `overlay-hook`
+feature and register **without** `features`. Sequence, so nobody registers a silent
+no-op:
+
+1. PORT merges the overlay branch and cuts a tag that contains `OverlayHook`
+   (`origin/master` at 3ad62a5 does not have it yet; nor does `v0.1.5`).
+2. port-plugins bumps its pinned `tag`/`rev` to that new PORT tag.
+3. Drop `features.overlay-hook` from this crate: delete the `[features]` entry, the
+   `#[cfg(feature = ...)]` on `pub mod host`, and the note. The adapter then compiles
+   always.
+4. Register in PORT: `port-app/Cargo.toml` (no `features`), `main.rs`, and both
+   `scripts/bump-port-plugins.sh` lists.
+
+Doing 4 before 2 leaves the plugin registered with no `overlay_hook()`, which paints
+nothing and reports nothing — the failure mode this ordering exists to prevent.
+
 **L26** (decision, PORT): `enabled` stays opt-out (`true` by default). An explicit
 `enabled` in this plugin's block is correct, and flipping the global default would turn
 existing plugins off without asking. Confirms the reasoning in the design note above.
