@@ -273,6 +273,16 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L30** (blocker for the path-local variant, verified): the `[patch."...port-plugins.git"]`
+block exists **only in PORT's main checkout** (`Cargo.toml:49`, marked "SOLO DESARROLLO
+LOCAL (no commitear)") and lists herdr, selection and mobile. The feature worktree
+`/tmp/port-overlay` does **not** have it. So registering by local path in that worktree
+requires adding the patch entry there first, and it is a local-only edit that must not be
+committed. With `rev` pinned instead, a push is mandatory before PORT can resolve it.
+
+Either way the registration patch cannot be verified from this repo alone; it needs one
+of those two decisions from the host owner.
+
 **L29** (correction to the order, verified): PORT's `[patch."https://github.com/loonbac/port.git"]`
 redirects `port-plugin-api` to its own local `crates/plugin-api`, with an explicit comment
 that without it `Plugin` resolves to two different crates. Consequence: with the patch
