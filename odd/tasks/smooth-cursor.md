@@ -273,6 +273,13 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L33** (pushed, verified reachable): `feat/smooth-cursor-plugin-clean` is pushed;
+`git ls-remote` reports `25aaa7cb9f592364b86edce781483f1daeca210b` on the remote, and a
+clone-less `git fetch --depth=1 origin <sha>` resolves it, so cargo can pin it with `rev`.
+The correct full sha is `25aaa7cb9f592364b86edce781483f1daeca210b`; an earlier truncated
+value quoted in conversation (`25aaa7c517c5…`) does not exist as an object — shas are
+copied from `git rev-parse`, never typed.
+
 **L32** (pin bumped and verified): `v0.1.12` resolves to `98f23a5` on PORT's master and
 declares version 0.1.12 with `OverlayHook` present. The pin for all three crates
 (`port-term-core`, `port-plugin-api`, `port-plugin-sdk`) now reads `tag = "v0.1.12"`.
