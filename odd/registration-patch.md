@@ -66,6 +66,34 @@ existe en el runner. La variable de entorno `PORT_PLUGINS_PATH` no existe hoy;
 el script `disable-local-patch.sh` retira el patch por nombre, así que añadir
 esta entrada no rompe el script.
 
+## El pin de port-plugins (paso previo, en mi repo)
+
+PORT publica el tag `v0.1.12` con `OverlayHook`. Antes de registrar hay que subir
+el pin de este repo, que hoy apunta a `v0.1.5` (versión 0.1.2, sin la API):
+
+```toml
+port-term-core  = { git = "https://github.com/loonbac/port.git", tag = "v0.1.12" }
+port-plugin-api = { git = "https://github.com/loonbac/port.git", tag = "v0.1.12" }
+port-plugin-sdk = { git = "https://github.com/loonbac/port.git", tag = "v0.1.12" }
+```
+
+Los tres, no solo la API: `port-plugin-sdk` declara el protocolo de los plugins
+externos y una desalineación de versiones entre `api` y `sdk` rompe la
+resolución por el `[patch]`.
+
+El `[patch]` de port-plugins también hay que retirar para el build contra tag:
+mientras esté activo, cargo resuelve la ruta local (`../port/crates/...`) y el
+lock no aprende la revisión publicada, que es la única vendorizable por Nix.
+Ese es exactamente el acoplamiento que documenta `scripts/bump-port-plugins.sh`
+en su cabecera.
+
+Orden final, con el tag ya publicado:
+
+1. Subir el pin a `v0.1.12` (los tres crates) y regenerar `Cargo.lock`.
+2. Push del crate a port-plugins.
+3. En PORT: registrar los cinco sitios con `rev` fijo.
+4. Verificación visual.
+
 ## Los cinco sitios
 
 ### 1. `crates/port-app/Cargo.toml`
