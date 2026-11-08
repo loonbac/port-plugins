@@ -273,6 +273,17 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L29** (correction to the order, verified): PORT's `[patch."https://github.com/loonbac/port.git"]`
+redirects `port-plugin-api` to its own local `crates/plugin-api`, with an explicit comment
+that without it `Plugin` resolves to two different crates. Consequence: with the patch
+active — always in local dev and in the feature worktree — the tag is bypassed and the
+local crate wins, which already has `OverlayHook`.
+
+So registration **can be built and verified today**, before any tag exists. The tag is
+needed for the release build, where `scripts/disable-local-patch.sh` strips the patch and
+everything resolves from tags. The ordering agreed with PORT stays correct for publishing;
+what changes is that it does not block verifying the feature.
+
 **L28** (handoff state): ownership is settled and nothing is pending on this side.
 PORT merges and tags; this repo bumps the pin; then the feature comes out; then the five
 registration sites. `smooth-cursor-review` stays frozen at the code commit `25012eb` and
