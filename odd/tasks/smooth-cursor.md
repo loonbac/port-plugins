@@ -289,6 +289,17 @@ no-op:
 Doing 4 before 2 leaves the plugin registered with no `overlay_hook()`, which paints
 nothing and reports nothing — the failure mode this ordering exists to prevent.
 
+**Correction (verified, not assumed):** without the `overlay-hook` feature this crate
+does not implement `Plugin` **at all**, because both `impl Plugin` and `impl OverlayHook`
+live in `host.rs`. PORT's `PluginRegistry::register<P: Plugin>` is generic over the
+trait, so `plugin_registry.register(SmoothCursorPlugin::new())` fails to compile rather
+than silently registering nothing.
+
+That is better news than feared: the failure is loud and at build time. But it means the
+feature is **mandatory** for any registration attempt, not merely recommended, and the
+ordering above is really "bump the pin, then drop the feature, then register" with no
+viable intermediate state.
+
 **L26** (decision, PORT): `enabled` stays opt-out (`true` by default). An explicit
 `enabled` in this plugin's block is correct, and flipping the global default would turn
 existing plugins off without asking. Confirms the reasoning in the design note above.
