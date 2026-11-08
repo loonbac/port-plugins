@@ -30,6 +30,42 @@ Eso no invalida el orden que acordamos — sigue siendo correcto para publicar �
 pero cambia qué se puede verificar ahora: el registro y la verificación visual
 son posibles hoy, contra el worktree, sin esperar tag ni push.
 
+## Las dos variantes de la dependencia (elige una)
+
+El crate no está pusheado ni publicado, así que el punto 2 tiene dos formas y
+ninguna es gratis. Verificado leyendo los archivos, no supuesto.
+
+### Variante A — `rev` fijo (requiere push de port-plugins)
+
+```toml
+port-plugin-smooth-cursor = { git = "https://github.com/loonbac/port-plugins.git", rev = "<sha>", features = ["overlay-hook"] }
+```
+
+Donde `<sha>` es `git rev-parse smooth-cursor-review` en el repo de port-plugins.
+Requiere que ese commit esté **pusheado**: cargo no resuelve un sha que no está
+en el remoto. Ventaja: no deja patch local que limpiar, sobrevive a un checkout
+accidental, y es la forma en que PORT consumirá el plugin cuando esté publicado.
+
+### Variante B — ruta local (no requiere push)
+
+El `[patch."https://github.com/loonbac/port-plugins.git"]` existe **solo en el
+checkout principal** (`Cargo.toml:49`, marcado "SOLO DESARROLLO LOCAL (no
+commitear)") y lista herdr, selection y mobile. El worktree
+`/tmp/port-overlay` **no lo tiene**, así que esta variante exige añadirlo allí:
+
+```toml
+[patch."https://github.com/loonbac/port-plugins.git"]
+port-plugin-smooth-cursor = { path = "../../port-plugins/in-process/smooth-cursor" }
+```
+
+Con `path`, la dependencia del punto 2 puede quedarse en `{ workspace = true }`.
+
+Coste: es una edición local de un archivo que hay que limpiar antes de commitear
+la rama, y si se cuela en un commit el build de release falla con una ruta que no
+existe en el runner. La variable de entorno `PORT_PLUGINS_PATH` no existe hoy;
+el script `disable-local-patch.sh` retira el patch por nombre, así que añadir
+esta entrada no rompe el script.
+
 ## Los cinco sitios
 
 ### 1. `crates/port-app/Cargo.toml`
