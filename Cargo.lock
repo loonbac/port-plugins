@@ -4039,6 +4039,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "port-plugin-smooth-cursor"
+version = "0.1.0"
+dependencies = [
+ "port-plugin-api",
+ "port-term-core",
+]
+
+[[package]]
 name = "port-plugin-transparency"
 version = "0.1.0"
 dependencies = [

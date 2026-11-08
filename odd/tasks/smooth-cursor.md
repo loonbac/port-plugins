@@ -1,0 +1,342 @@
+# smooth-cursor — animated terminal cursor for PORT
+
+A PORT in-process plugin that reproduces Ghostty's `smooth_cursor.glsl`: the cursor
+rectangle interpolates between its previous and current cell instead of jumping, with
+an easing curve and a fading trail. PORT has no cursor render hook today, so the
+feature is split: **PORT core grows a `CursorHook`, this repo grows the plugin that
+consumes it.**
+
+## Specs
+
+**S1.** The user asked for a PORT plugin "que agregue esta clase de animacion", and
+explicitly did **not** want a literal port of the shader mechanics:
+
+> pero mejor, al estilo de los plugins de port, que este bien integrado, quisa no se
+> pueda hacer como lo hace ghostty pero hay que hacerlo de otra manera que port si
+> soporte ya que usa gpui y todo eso
+
+**S2.** The animation parameters and behaviour come from the Ghostty shader:
+
+```
+#define ANIMATION_DURATION 0.12  // más alto = más lento y más visible
+#define TRAIL_STRENGTH 0.30      // 0.0 = sin estela
+#define CORNER_RADIUS 2.0        // redondeo en píxeles
+```
+
+> 2. Interpolación con easing, no lineal. progress va de 0 a 1 y se le pasa por
+> easeOutCubic (arranca rápido, frena suave). Después mix() interpola centro y tamaño
+> entre iPreviousCursor e iCurrentCursor. Ese mix de tamaño además es lo que hace que
+> el cursor parezca estirarse cuando salta entre una línea de texto y un bloque más alto.
+
+**S3.** The trail is the segment already travelled, faded by remaining progress:
+
+```
+if (h <= t) {
+    float fadeFactor = (1.0 - progress) * TRAIL_STRENGTH;  // 0.30
+    trailMask = lineAlpha * fadeFactor;
+}
+```
+
+> Con TRAIL_STRENGTH = 0.30 y el fade proporcional a (1 - progress), la estela se apaga
+> a medida que el cursor llega. Es deliberadamente imperceptible: sugiere movimiento sin
+> dejar un rastro visible.
+
+**S4.** Passthrough is the default: no work unless the cursor is visible, moved, and the
+transition is still running.
+
+```
+float timeSinceMove = iTime - iTimeCursorChange;
+if (timeSinceMove >= ANIMATION_DURATION) { fragColor = terminalColor; return; }
+```
+
+**S5.** PORT must not pay Ghostty's `custom-shader-animation = always` cost, which the
+user described as the price of smoothness:
+
+> Es también el coste: redibuja el viewport completo a tasa de refresco aunque no pase
+> nada. En una laptop eso se nota en batería.
+
+**S6.** The three tunables are user-editable configuration, like every other PORT plugin:
+
+> Las tres constantes al inicio del shader son todo
+
+**S7.** Core changes live in the PORT repo and are requested from the PORT session, not
+made here:
+
+> dale la a, pero los cambios que pides de port pideselos a la sesion de pi que abri del
+> repo de port
+
+## The contract PORT provides
+
+Final shape, agreed with the PORT session. It is a **generic per-frame overlay
+primitive**, deliberately not named after this use case.
+
+```rust
+pub struct CellRect {
+    pub column: f32, pub row: f32, pub width: f32, pub height: f32,
+}
+pub struct CursorState { pub rect: CellRect, pub shape: CursorShape, pub color: Rgb }
+pub struct FrameView {
+    pub cursor: Option<CursorState>,
+    pub now_ms: u64,
+    pub focused: bool,
+}
+pub struct OverlayQuad {
+    pub rect: CellRect, pub color: Rgb, pub opacity: f32, pub corner_radius_px: f32,
+}
+pub struct Overlay { pub quads: Vec<OverlayQuad>, pub suppress_native_cursor: bool }
+pub trait OverlayHook {
+    fn overlay(&self, view: &FrameView) -> Option<Overlay> { None }
+    fn needs_animation(&self) -> bool { false }
+}
+```
+
+Plus `Plugin::overlay_hook()` with a `None` default.
+
+Agreed semantics:
+
+- **Positions** in fractional cell space relative to the viewport.
+- **Lengths the user configures** (corner radius, future thicknesses) in pixels.
+  `corner_radius_px` goes straight to `PaintQuad::corner_radii`; the host converts
+  nothing and 2.0 means 2 px at any font size.
+- `CursorState.rect` is the native footprint (the whole cell PORT would invert);
+  `color` is the fill that inversion would produce. `shape` mirrors `term-core`
+  (Block/Beam/Underline/Hidden) so the plugin never assumes a block.
+- `FrameView.cursor = None` still invokes the hook: reset state and return `None`.
+  This is what prevents a stale rect from producing a trail across the screen.
+- One invocation per painted frame through `invoke_hook` (panic and timeout
+  isolation, 250 ms budget). Frames are only painted when something asks for one
+  (PTY output, animation, gesture), not at a free 60 fps.
+- `needs_animation()` is OR-ed with `LayoutHook::needs_animation()`. The obligation:
+  it must fall back to `false` when the transition ends, or the plugin buys back
+  the permanent repaint this feature exists to avoid.
+- First `Some` wins, in plugin registration order (documented, not deterministic
+  from the plugin's point of view).
+- Paint order: after glyphs and images, before the chrome. `suppress_native_cursor`
+  gates the native cursor in that same frame.
+
+PORT-side files: `crates/plugin-api/src/hooks.rs`, `crates/plugin-api/src/registry/
+hooks.rs`, `crates/port-app/src/view/mod.rs`, `crates/port-app/src/view/paint.rs`.
+
+## Design note: the clock the hook does not get
+
+`OverlayHook::needs_animation(&self)` takes no `now_ms`, so the plugin cannot compute
+"am I mid-transition" while the registry asks. Inventing `true` would be a sticky
+request and reintroduce permanent repaint.
+
+The plugin answers from the last painted frame: `quads()` recomputes the transition
+state for the frame and stores it; `needs_animation()` returns that stored value. The
+cost is one frame of lag in switching the channel off, which coincides with
+`HANDOFF_GRACE_MS` — the same frame the plugin needs to hand the native cursor back.
+Tests: `cached_frame_request_stops_after_the_transition`, `idle_cursor_does_not_request_frames`.
+
+## Design note: enabled by default follows the host
+
+`Config::default()` ships `enabled: true`. That is not a preference: PORT's
+`PluginConfig::is_enabled` returns `config.get_bool("enabled").unwrap_or(true)`, so a
+plugin that omitted the key would be on anyway. Shipping it on keeps the file honest
+about what is happening, and `enabled = false` in the `smooth-cursor` block is the kill
+switch.
+
+## Design note: the frame budget is a tested property
+
+The battery cost of this feature is the number of frames a transition requests. That
+is now an assertion, not a hope: `a_transition_requests_a_bounded_number_of_frames`
+simulates a 60 Hz host through a full transition and requires it to finish in 5..15
+frames, then verifies that 50 further frames request nothing.
+
+It is written this way on purpose. A regression here is invisible in a screenshot and
+shows up as a warm laptop, so the ceiling belongs in a test rather than in a comment.
+
+## Design note: one entry point per frame
+
+`SmoothCursorPlugin::frame(rect, now_ms)` is the only method the adapter calls. It
+registers the cursor (or the reset) and then consumes the result, in that order, so
+`needs_animation()` is refreshed even when the hook returns `None`.
+
+This exists because of a defect found while reviewing the adapter: reading the color
+with `view.cursor?.color` before calling `quads()` returns early when the cursor is
+gone, leaving the cached frame request stuck on `true` — the permanent repaint the
+whole design avoids. Test: `disappearing_cursor_does_not_leave_frames_requested`.
+
+## Integration surface: more than one line
+
+Wiring the crate into PORT touches more than `Cargo.toml` and `main.rs`. Verified:
+
+1. `crates/port-app/Cargo.toml` — add `port-plugin-smooth-cursor` as a path dep
+   (dev) / git dep (release), like `port-plugin-herdr`.
+2. `crates/port-app/src/main.rs` — `plugin_registry.register(SmoothCursorPlugin::new())`
+   next to `HerdrPlugin`.
+3. `[patch."https://github.com/loonbac/port.git"]` in port-plugins already covers
+   `port-plugin-api`; nothing to add there.
+4. **`scripts/bump-port-plugins.sh` hardcodes the plugin list**: `cargo update -p
+   port-plugin-herdr -p port-plugin-selection` at line 122 and the hash extraction
+   loop at line 154. A new plugin that is not added to both is silently left out of
+   the lock bump, and the failure surfaces much later as a Nix hash mismatch. This is
+   the step easiest to forget and the most expensive to debug.
+5. `flake.nix` `cargoLock.outputHashes` is rewritten by that script from the build's
+   own report; do not hand-edit.
+
+PORT's own repo owns steps 1, 2, 4 and 5. This repo owns the crate.
+
+## Tasks
+
+| ID | What | Links | Route | Commit |
+|----|------|-------|-------|--------|
+| T1 | Write the contract document and send it to the PORT session | S1,S7 | inline | done |
+| T2 | Create `in-process/smooth-cursor` crate: `CursorState` with previous/current rect, movement detection, `progress()`, `ease_out_cubic`, trail segment | S2,S3,S4 | inline | pending |
+| T3 | Plugin shell: id, config keys, `needs_animation()` from the last frame, `overlay()` passthrough when idle | S4,S5,S6 | inline | done (33 tests) |
+| T4 | Adapter against the real API (`host.rs`): `Plugin` + `OverlayHook`, host `CellRect` conversion at the boundary | S1,S4,S5,S6 | inline | done (39 tests, commit 0570cb7 of PORT) |
+| T5 | Wire the plugin into PORT: `port-app/Cargo.toml` (with `features = ["overlay-hook"]`), `main.rs` registration, and both hardcoded lists in `scripts/bump-port-plugins.sh` | S7 | mine, after PORT merges its branch | |
+| T6 | Narrow the overlay rect for `Beam`/`Underline` using `CursorState.shape` | S2 | inline | done (43 tests) |
+| T7 | Verify visually in a real compositor: before/after capture of a cursor jump, trail presence, idle CPU when the transition ends | S2,S5 | tbd | |
+
+## Log
+
+**L1** (verbatim, user):
+
+> necesito que crees un nuevo plugin para port que agregue esta clase de animacion
+> Cómo está montado
+> Son dos piezas: la config que enciende la animación y un shader GLSL que la dibuja.
+> Ghostty no trae animación de cursor; lo que trae es un sistema de custom shaders que se
+> ejecuta en cada frame con uniformes sobre el estado del cursor.
+> [config: custom-shader + custom-shader-animation = always; uniformes iChannel0,
+> iCurrentCursor/iPreviousCursor, iCurrentCursorColor, iTimeCursorChange, iCursorVisible;
+> las cinco ideas del shader; ANIMATION_DURATION 0.12, TRAIL_STRENGTH 0.30,
+> CORNER_RADIUS 2.0; el 0.80 de mezcla; el coste de `always`]
+> pero mejor, al estilo de los plugins de port, que este bien integrado, quisa no se
+> pueda hacer como lo hace ghostty pero hay que hacerlo de otra manera que port si
+> soporte ya que usa gpui y todo eso
+
+**L2** (verbatim, user): "dale la a" — implement option A: full effect (interpolation,
+easing, trail, rounded corners), which requires new PORT core API plus the plugin.
+
+**L3** (verbatim, user): "pero los cambios que pides de port pideselos a la sesion de pi
+que abri del repo de port" — core work is requested from PORT session
+`01a18027-ad72-75f5-af04-20d8f67a8685`; this repo does not modify PORT.
+
+**L4** (evidence, exploration): a store plugin cannot do this. `Capability` has no paint
+or animation message (`crates/plugin-sdk/src/protocol.rs:44`), `LayoutHook` is excluded
+from the protocol (`:30-33`), and `needs_animation` iterates in-process plugins only
+(`crates/plugin-api/src/registry/hooks.rs:565-577`). An in-process plugin with today's
+hooks cannot either: `LayoutHook`'s three bars are flex siblings of the canvas
+(`crates/port-app/src/view/mod.rs:402-425`), and the cursor is a style inversion inside
+`paint_frame` (`crates/port-app/src/view/paint.rs:589-597`). Hence the new `CursorHook`.
+
+**L6** (decision, PORT session): `corner_radius` stays in **pixels**. PORT owns the
+conversion with its `Metrics` before calling `PaintQuad::corner_radii`, so the plugin
+never receives cell size and cannot hold a stale value when the font changes. Rule:
+cell-space positions, pixel-space lengths the user configures. `cell_width_px` /
+`cell_height_px` are not exposed at all. Accepted; `Tuning::corner_radius_px` already
+reflects it.
+
+**L7** (decision, PORT session): `CursorView.shape` mirrors `term-core`'s enum so the
+plugin never assumes a block, and `CursorHook::needs_animation()` is OR-ed with
+`LayoutHook`'s. Open request from L8 below: the hook must be invoked even when
+`rect` is `None`, so the plugin can reset instead of holding a stale cursor.
+
+**L8** (accepted, PORT): unconditional invocation. One call per painted frame even
+with `cursor: None`, which means "reset and return `None`". This is what keeps a
+stale rect from producing a trail across the screen when the cursor reappears
+somewhere else.
+
+**L9** (decision, PORT): the contract is a generic `OverlayHook`, not `CursorHook`.
+Same mechanism, no use-case name in the API. `suppress_native_cursor` becomes
+explicit instead of implied by `Some`.
+
+**L11** (accepted, PORT): two guarantees. (a) Suppression is evaluated only from the
+hook's result in the same frame, with no state carried between frames; the sequence is
+an invariant tested at registry level (second call returns `None` ⇒ native visible).
+(b) Unconditional invocation is confirmed by the host owner. Units closed on
+`corner_radius_px` with nothing to convert anywhere.
+
+**L13** (discovery, adapter): `CursorShape` and `Rgb` live in `port-term-core`, not in
+`port-plugin-api`, and `Rgb` is 8-bit per channel (`u8`), not float. The crate already
+depends on `port-term-core`, so nothing new was needed.
+
+**L20** (verified): the adapter builds, tests and passes clippy against the branch tip
+`3c5f922`. `cargo fmt --check` is clean for this crate. The Cargo feature
+`overlay-hook` stays off by default until the API lands in the branch the `[patch]`
+resolves.
+
+**L22** (commit): branch `feat/smooth-cursor-plugin-clean`, based on `origin/master`
+(f43dfc7), worktree `/tmp/sc-clean`. **The reviewable commit is the one tagged
+`smooth-cursor-review`**; the sha is not written here because editing this file moves
+it. The crate directory is byte-identical across every amended sha (verified with
+`git diff` against each), so the tag is the only stable reference:
+
+    git rev-parse smooth-cursor-review
+The first attempt sat on the `herdr-layout-cwd` branch and dragged four unrelated
+commits into the review, so it was replayed with `git am` onto master.
+37 tests pass on that base; the adapter needs PORT's branch, hence the feature flag.
+
+**L25** (decision, PORT): registration is mine, performed after the PORT branch is
+merged; whether it rides the same PR is the host owner's call together with the push
+authorization.
+
+**L26** (decision, PORT): `enabled` stays opt-out (`true` by default). An explicit
+`enabled` in this plugin's block is correct, and flipping the global default would turn
+existing plugins off without asking. Confirms the reasoning in the design note above.
+
+**L24** (slice, deliberate): this feature lands as one commit (~1810 authored lines),
+past the ~400-line guideline. Splitting it would produce commits that do not
+compile independently: `anim` is exercised by `plugin`, `plugin` by `host`, and `config`
+feeds both. The reviewable unit here is the feature, and the four modules are read in
+that order. Recorded so the exception is visible rather than accidental.
+
+**L23** (release blocker, PORT): the `[patch]` pins `v0.1.5`, which declares version
+0.1.2 and has no `OverlayHook`. Registering the plugin against port-app therefore needs
+a new PORT tag containing the overlay branch, or the build fails resolving the hook.
+Not a defect in this crate; it is a release ordering constraint.
+
+**L21** (defect, PORT, cosmetic): commit `3c5f922` added the requested warning but left
+the doc block mis-indented — two lines start at column 0 inside a `///` block, and one
+sentence got merged onto the previous line ("Cuesta un cuadro de retraso al apagar," now
+trails the warning). It compiles and `cargo check` passes, so it is documentation
+appearance only, not a build break. Worth one `cargo fmt` before the PR.
+
+**L17** (decision, PORT): `needs_animation()` keeps zero arguments (`LayoutHook`
+parity, no implementor breakage). The cached-flag pattern is documented in `hooks.rs`
+as the contract, commit `9657906`. Nothing to delete in the adapter.
+
+**L18** (decision, PORT): quads are free geometry, clipped only to the grid; a Beam may
+emit a quad of 0.15 cells. Commit `d4688b6` also records that `CursorShape` and `Rgb`
+live in `term_core` with `u8` channels. Implemented as `anim::shape_rect` with
+`BEAM_WIDTH = 0.15` and `UNDERLINE_HEIGHT = 0.12`; the trail inherits the shape.
+
+**L19** (defect, adapter, caught by a test): adding `shape` to the adapter first used
+`view.cursor.map(...)?`, whose early return skipped the result consumption and left the
+cached frame request stuck on `true` — the exact defect `hidden_cursor_resets_and_stops_frames`
+was written for. Fixed with `unwrap_or_default()` so `frame()` always runs. The test paid
+for itself immediately.
+
+**L15** (build, adapter): the adapter compiles only against the overlay API, which
+lives in PORT's `feature/overlay-hook` worktree and is not merged. The crate therefore
+gates `host.rs` behind a Cargo feature, `overlay-hook`, off by default, so the
+workspace keeps building. Verified with the patch pointed at `/tmp/port-overlay`:
+39 tests green and clippy clean with the feature on.
+
+**L16** (pre-existing, not ours): `cargo test --workspace` fails in `port-plugin-mobile`
+(`missing fields debug and images in initializer of Frame`) because the local
+`../port` branch is ahead of the `v0.1.5` API that crate pins. Its file has no local
+changes; unrelated to this feature.
+
+**L14** (discovery, adapter): `in-process/smooth-cursor` keeps its own `CellRect` so
+`anim` compiles without `port-plugin-api`; `host.rs` converts at the single boundary.
+
+**L12** (process, PORT): implementation lands in a new worktree on a feature branch,
+not master. Push and PR are the host owner's decision, so visible evidence is the
+commit plus `path:line` in the sibling clone, not a PR.
+
+**L10** (plugin, handoff gap): with `suppress_native_cursor: true` the native cursor
+is hidden while animating. If the transition ends in the same frame that stops
+requesting animation, the last painted frame keeps the native cursor suppressed with
+the animated one frozen mid-way. Fixed on the plugin side: the tick survives
+`HANDOFF_GRACE_MS = 32` after the transition, and `overlay()` returns `None` once the
+transition is over, so the native cursor is restored. Tests
+`handoff_keeps_one_extra_frame_then_stops` and `idle_cursor_never_requests_frames`.
+
+**L5** (discovery): PORT always paints a block cursor. `CursorShape::Beam` and
+`Underline` are produced by `term-core` (`crates/term-core/src/frame/mod.rs:84`) but never
+read by `port-app`, which uses only `frame.cursor_run`. There is also no cursor blink and
+no inter-frame cursor state. Both are out of scope here, noted so the plugin does not
+assume shape support.
