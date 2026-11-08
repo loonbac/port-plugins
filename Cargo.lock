@@ -3950,10 +3950,11 @@ checksum = "5da3b0203fd7ee5720aa0b5e790b591aa5d3f41c3ed2c34a3a393382198af2f7"
 
 [[package]]
 name = "port-plugin-api"
-version = "0.1.10"
+version = "0.1.12"
+source = "git+https://github.com/loonbac/port.git?tag=v0.1.12#98f23a5cc51daabb4353c4d2ac7904233a1d9d40"
 dependencies = [
  "gpui",
- "port-plugin-sdk 0.1.10",
+ "port-plugin-sdk",
  "port-term-core",
  "serde",
  "serde_json",
@@ -3971,7 +3972,7 @@ dependencies = [
 name = "port-plugin-font"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2",
+ "port-plugin-sdk",
  "serde_json",
 ]
 
@@ -3979,7 +3980,7 @@ dependencies = [
 name = "port-plugin-font-zoom"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2",
+ "port-plugin-sdk",
  "serde_json",
 ]
 
@@ -4007,16 +4008,8 @@ dependencies = [
 
 [[package]]
 name = "port-plugin-sdk"
-version = "0.1.2"
-source = "git+https://github.com/loonbac/port.git?tag=v0.1.5#75b10a06fc3be438b822215c2b9f7b30b644827a"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "port-plugin-sdk"
-version = "0.1.10"
+version = "0.1.12"
+source = "git+https://github.com/loonbac/port.git?tag=v0.1.12#98f23a5cc51daabb4353c4d2ac7904233a1d9d40"
 dependencies = [
  "serde",
  "serde_json",
@@ -4050,13 +4043,14 @@ dependencies = [
 name = "port-plugin-transparency"
 version = "0.1.0"
 dependencies = [
- "port-plugin-sdk 0.1.2",
+ "port-plugin-sdk",
  "serde_json",
 ]
 
 [[package]]
 name = "port-term-core"
-version = "0.1.10"
+version = "0.1.12"
+source = "git+https://github.com/loonbac/port.git?tag=v0.1.12#98f23a5cc51daabb4353c4d2ac7904233a1d9d40"
 dependencies = [
  "alacritty_terminal",
  "libc",

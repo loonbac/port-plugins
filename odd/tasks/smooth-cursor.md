@@ -273,6 +273,19 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L32** (pin bumped and verified): `v0.1.12` resolves to `98f23a5` on PORT's master and
+declares version 0.1.12 with `OverlayHook` present. The pin for all three crates
+(`port-term-core`, `port-plugin-api`, `port-plugin-sdk`) now reads `tag = "v0.1.12"`.
+`Cargo.lock` had to be regenerated **with the local `[patch]` removed**, because while it
+is active cargo resolves the sibling path and the lock never learns the published
+revision — the coupling `scripts/bump-port-plugins.sh` documents in its header. The
+regenerated lock records
+`git+https://github.com/loonbac/port.git?tag=v0.1.12#98f23a5`, which is what Nix can
+vendorize. The `[patch]` is restored afterwards for local development.
+
+Verified with the patch removed and `--offline` **not** passed (a fresh lock needs to
+fetch): 43 tests pass against the published tag, no feature selected.
+
 **L31** (merge, resolved): PORT merged `feature/overlay-hook` into master as `afb2566`
 (PR #18). `crates/plugin-api/src/hooks.rs` on that branch has `OverlayHook` and
 `Plugin::overlay_hook`. The feature flag is therefore **gone**: `[features]` removed from
