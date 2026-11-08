@@ -5,17 +5,6 @@ edition.workspace = true
 license.workspace = true
 description = "PORT Plugin: anima el cursor de la terminal (interpolación, easing y estela)"
 
-[features]
-# El adaptador del host se compila solo cuando la API de overlay existe en el
-# `port-plugin-api` que resuelve el workspace. Nace apagado: la rama
-# `feature/overlay-hook` de PORT todavía no está mergeada, y con el flag activo
-# el workspace entero dejaría de compilar. Se enciende al integrar:
-#
-#   cargo build -p port-plugin-smooth-cursor --features overlay-hook
-#
-# y se retira cuando la API esté en la rama que fija el `[patch]`.
-overlay-hook = []
-
 [dependencies]
 port-plugin-api = { workspace = true }
 port-term-core = { workspace = true }

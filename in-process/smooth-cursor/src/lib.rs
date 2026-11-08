@@ -7,9 +7,6 @@
 
 pub mod anim;
 pub mod config;
-/// Adaptador de los traits del host. Requiere la API de overlay en
-/// `port-plugin-api`; ver la nota del flag en `Cargo.toml`.
-#[cfg(feature = "overlay-hook")]
 pub mod host;
 pub mod plugin;
 

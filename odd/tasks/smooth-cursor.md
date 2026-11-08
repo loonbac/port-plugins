@@ -273,6 +273,17 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L31** (merge, resolved): PORT merged `feature/overlay-hook` into master as `afb2566`
+(PR #18). `crates/plugin-api/src/hooks.rs` on that branch has `OverlayHook` and
+`Plugin::overlay_hook`. The feature flag is therefore **gone**: `[features]` removed from
+`Cargo.toml`, `#[cfg(feature = "overlay-hook")]` removed from `pub mod host` in `lib.rs`.
+Verified against a detached worktree at `afb2566`: 43 tests, clippy `-D warnings` and
+`cargo fmt --check` clean, with no feature selected.
+
+Registration still needs the crate reachable by PORT: either a push (variant A) or the
+local patch entry in its worktree (variant B). The merge removed the API blocker, not the
+distribution one.
+
 **L30** (blocker for the path-local variant, verified): the `[patch."...port-plugins.git"]`
 block exists **only in PORT's main checkout** (`Cargo.toml:49`, marked "SOLO DESARROLLO
 LOCAL (no commitear)") and lists herdr, selection and mobile. The feature worktree
