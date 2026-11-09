@@ -273,6 +273,27 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L36** (defect found by the reported symptom, fixed plugin-side): PORT asks
+`needs_animation()` **before** invoking `overlay()` (`view/mod.rs:282-287`). In the frame
+where the cursor jumps after `Alt+Backspace`, the answer comes from the previous frame
+(idle ⇒ `false`), so the host does **not** call `request_animation_frame`. The overlay
+then paints the interpolated position — which at progress 0 is the *old* cursor — and
+`suppress_native_cursor` hides the real one. No further frames are requested, so the
+cursor stays painted where it no longer is until another keypress forces a frame. That
+is the reported symptom exactly ("borro y se queda a la derecha, hasta que presiono una
+tecla y se actualiza").
+
+Plugin-side fix: the frame that starts a transition returns `None` instead of quads, so
+the native cursor is painted at the correct position; the frame flag is still stored, so
+the next frame animates. Tests:
+`the_frame_that_starts_a_transition_does_not_paint_a_stale_cursor`,
+`the_next_frame_paints_the_animation`. 47 tests green.
+
+**Host-side follow-up (owned by PORT):** reordering `overlay()` before
+`needs_animation()` makes the flag reflect the current frame, which also restores the
+animation on that very first jump. With the current order the plugin fix is correct but
+costs the first jump its animation.
+
 **L34** (registration landed, verified by reading): PORT master `2518809` (tag `v0.1.13`)
 carries all three code sites: `crates/port-app/Cargo.toml:21`, `main.rs:27` (import) and
 `:68` (`register`), and the workspace dep at `Cargo.toml:39` pinned by

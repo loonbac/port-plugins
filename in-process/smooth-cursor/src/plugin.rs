@@ -66,14 +66,14 @@ impl SmoothCursorPlugin {
     /// `rect: None` resetea el estado: es lo que evita que un cursor que
     /// desaparece y reaparece en otro sitio dibuje una estela entre dos
     /// posiciones que nunca fueron consecutivas.
-    pub fn begin_frame(&self, rect: Option<CellRect>, now_ms: u64) {
+    pub fn begin_frame(&self, rect: Option<CellRect>, now_ms: u64) -> bool {
         let config = self.config();
         let mut animator = self.animator.lock().expect("animator envenenado");
         if !config.enabled {
             animator.observe(None, now_ms);
-            return;
+            return false;
         }
-        animator.observe(rect, now_ms);
+        animator.observe(rect, now_ms)
     }
 
     /// `true` si hay que seguir pidiendo cuadros.
@@ -101,8 +101,23 @@ impl SmoothCursorPlugin {
     /// cuando no hay cursor, el flag quedaría pegado en `true` y volvería el
     /// refresco permanente.
     pub fn frame(&self, rect: Option<CellRect>, shape: Shape, now_ms: u64) -> Option<Vec<Quad>> {
-        self.begin_frame(rect, now_ms);
-        self.quads_for(shape, now_ms)
+        let started = self.begin_frame(rect, now_ms);
+        let quads = self.quads_for(shape, now_ms);
+        // El host pregunta `needs_animation()` ANTES de invocarnos
+        // (view/mod.rs:282-287), así que en el cuadro en que la transición
+        // arranca ya decidió que no hacía falta pedir otro cuadro. Si aquí
+        // devolviéramos Some, pintaríamos el cursor en la posición vieja con el
+        // nativo suprimido y, sin repintado, se quedaría clavado ahí hasta que
+        // otra tecla forzara un cuadro. Es exactamente el defecto observado:
+        // borrar con Alt+Backspace deja el cursor a la derecha.
+        //
+        // En ese primer cuadro se devuelve None: el nativo se pinta en la
+        // posición correcta y el flag queda encendido, así que el siguiente
+        // cuadro sí se pide y la animación corre.
+        if started {
+            return None;
+        }
+        quads
     }
 
     /// Respuesta a `OverlayHook::needs_animation()`: la del último cuadro.
@@ -409,5 +424,66 @@ mod tests {
 
         let saved = plugin.current_plugin_config();
         assert_eq!(saved.get(crate::config::KEY_DURATION_MS), Some("300"));
+    }
+}
+
+#[cfg(test)]
+mod host_order_tests {
+    use super::*;
+    use crate::anim::Shape;
+
+    fn r(c: f32, row: f32) -> CellRect {
+        CellRect { column: c, row, width: 1.0, height: 1.0 }
+    }
+
+    /// PORT pregunta `needs_animation()` ANTES de invocar `overlay()`
+    /// (view/mod.rs:282-287). Consecuencia: en el cuadro en que el cursor salta,
+    /// el host ya decidió que no hacía falta pedir otro cuadro, mirando el
+    /// estado del cuadro anterior.
+    ///
+    /// Si en ese cuadro el plugin devolviera quads, pintaría el cursor en la
+    /// posición vieja y suprimiría el nativo, sin repintado posterior: el cursor
+    /// se quedaría clavado donde ya no está hasta que otra tecla forzara un
+    /// cuadro. El síntoma reportado es exactamente ese (borrar con
+    /// Alt+Backspace deja el cursor a la derecha).
+    ///
+    /// Por eso el cuadro que arranca la transición devuelve None: el nativo se
+    /// pinta en la posición correcta. La animación arranca en el siguiente
+    /// cuadro que llegue, ya con el flag encendido.
+    #[test]
+    fn the_frame_that_starts_a_transition_does_not_paint_a_stale_cursor() {
+        let plugin = SmoothCursorPlugin::new();
+
+        // Cuadro 1: cursor quieto al final del texto.
+        plugin.begin_frame(Some(r(30.0, 2.0)), 0);
+        assert!(plugin.quads(0).is_none());
+        assert!(!plugin.wants_frames_cached(), "quieto: no pide cuadros");
+
+        // El host ya preguntó (respuesta: no) y ahora invoca con el cursor
+        // movido por Alt+Backspace.
+        let painted = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
+
+        assert!(
+            painted.is_none(),
+            "el cuadro inicial no debe pintar el cursor viejo: quedaría clavado"
+        );
+        assert!(
+            plugin.wants_frames_cached(),
+            "pero sí debe encender el flag para que el siguiente cuadro anime"
+        );
+    }
+
+    /// El cuadro siguiente, ya con el flag encendido, sí pinta la animación.
+    #[test]
+    fn the_next_frame_paints_the_animation() {
+        let plugin = SmoothCursorPlugin::new();
+        plugin.begin_frame(Some(r(30.0, 2.0)), 0);
+        let _ = plugin.quads(0);
+
+        let _ = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
+        let painted = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 116);
+
+        assert!(painted.is_some(), "la animación corre a partir del segundo cuadro");
+        assert!(plugin.wants_frames_cached());
     }
 }
