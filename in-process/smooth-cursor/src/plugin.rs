@@ -101,23 +101,8 @@ impl SmoothCursorPlugin {
     /// cuando no hay cursor, el flag quedaría pegado en `true` y volvería el
     /// refresco permanente.
     pub fn frame(&self, rect: Option<CellRect>, shape: Shape, now_ms: u64) -> Option<Vec<Quad>> {
-        let started = self.begin_frame(rect, now_ms);
-        let quads = self.quads_for(shape, now_ms);
-        // El host pregunta `needs_animation()` ANTES de invocarnos
-        // (view/mod.rs:282-287), así que en el cuadro en que la transición
-        // arranca ya decidió que no hacía falta pedir otro cuadro. Si aquí
-        // devolviéramos Some, pintaríamos el cursor en la posición vieja con el
-        // nativo suprimido y, sin repintado, se quedaría clavado ahí hasta que
-        // otra tecla forzara un cuadro. Es exactamente el defecto observado:
-        // borrar con Alt+Backspace deja el cursor a la derecha.
-        //
-        // En ese primer cuadro se devuelve None: el nativo se pinta en la
-        // posición correcta y el flag queda encendido, así que el siguiente
-        // cuadro sí se pide y la animación corre.
-        if started {
-            return None;
-        }
-        quads
+        self.begin_frame(rect, now_ms);
+        self.quads_for(shape, now_ms)
     }
 
     /// Respuesta a `OverlayHook::needs_animation()`: la del último cuadro.
@@ -433,25 +418,24 @@ mod host_order_tests {
     use crate::anim::Shape;
 
     fn r(c: f32, row: f32) -> CellRect {
-        CellRect { column: c, row, width: 1.0, height: 1.0 }
+        CellRect {
+            column: c,
+            row,
+            width: 1.0,
+            height: 1.0,
+        }
     }
 
-    /// PORT pregunta `needs_animation()` ANTES de invocar `overlay()`
-    /// (view/mod.rs:282-287). Consecuencia: en el cuadro en que el cursor salta,
-    /// el host ya decidió que no hacía falta pedir otro cuadro, mirando el
-    /// estado del cuadro anterior.
+    /// PORT invierte el orden desde el fix del host: invoca `overlay()` y
+    /// **después** pregunta `needs_animation()`. Consecuencia: el flag que
+    /// devuelve `needs_animation()` ya refleja el cuadro actual, no el anterior.
     ///
-    /// Si en ese cuadro el plugin devolviera quads, pintaría el cursor en la
-    /// posición vieja y suprimiría el nativo, sin repintado posterior: el cursor
-    /// se quedaría clavado donde ya no está hasta que otra tecla forzara un
-    /// cuadro. El síntoma reportado es exactamente ese (borrar con
-    /// Alt+Backspace deja el cursor a la derecha).
-    ///
-    /// Por eso el cuadro que arranca la transición devuelve None: el nativo se
-    /// pinta en la posición correcta. La animación arranca en el siguiente
-    /// cuadro que llegue, ya con el flag encendido.
+    /// Eso es lo que hace que el PRIMER cuadro de un salto anime. Con el orden
+    /// viejo (preguntar antes de invocar) el flag venía del cuadro quieto,
+    /// decía `false`, no se pedía repintado y el cursor pintado en la posición
+    /// vieja se quedaba clavado hasta que otra tecla forzara un cuadro.
     #[test]
-    fn the_frame_that_starts_a_transition_does_not_paint_a_stale_cursor() {
+    fn the_jump_frame_paints_and_asks_for_another_frame() {
         let plugin = SmoothCursorPlugin::new();
 
         // Cuadro 1: cursor quieto al final del texto.
@@ -459,31 +443,59 @@ mod host_order_tests {
         assert!(plugin.quads(0).is_none());
         assert!(!plugin.wants_frames_cached(), "quieto: no pide cuadros");
 
-        // El host ya preguntó (respuesta: no) y ahora invoca con el cursor
-        // movido por Alt+Backspace.
+        // Alt+Backspace: el cursor salta a la izquierda. El host invoca primero.
         let painted = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
+        assert!(painted.is_some(), "el salto se pinta en este mismo cuadro");
 
-        assert!(
-            painted.is_none(),
-            "el cuadro inicial no debe pintar el cursor viejo: quedaría clavado"
-        );
+        // Y solo después pregunta: la respuesta ya es la del cuadro actual.
         assert!(
             plugin.wants_frames_cached(),
-            "pero sí debe encender el flag para que el siguiente cuadro anime"
+            "debe pedir el siguiente cuadro o la animación no corre"
         );
     }
 
-    /// El cuadro siguiente, ya con el flag encendido, sí pinta la animación.
+    /// La animación avanza en cuadros sucesivos y se apaga sola al terminar.
     #[test]
-    fn the_next_frame_paints_the_animation() {
+    fn the_animation_advances_then_stops() {
         let plugin = SmoothCursorPlugin::new();
         plugin.begin_frame(Some(r(30.0, 2.0)), 0);
         let _ = plugin.quads(0);
 
-        let _ = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
-        let painted = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 116);
-
-        assert!(painted.is_some(), "la animación corre a partir del segundo cuadro");
+        let first = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
+        assert!(first.is_some());
         assert!(plugin.wants_frames_cached());
+
+        let mid = plugin
+            .frame(Some(r(25.0, 2.0)), Shape::Block, 160)
+            .expect("a mitad");
+        assert!(
+            mid[0].rect.column > 25.0 && mid[0].rect.column < 30.0,
+            "interpola entre origen y destino: {}",
+            mid[0].rect.column
+        );
+
+        // Pasada la gracia no pinta y deja de pedir cuadros.
+        let late = crate::anim::HANDOFF_GRACE_MS + 121;
+        assert_eq!(
+            plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100 + late),
+            None
+        );
+        assert!(!plugin.wants_frames_cached());
+    }
+
+    /// Un cursor oculto sigue reseteando aunque el orden haya cambiado.
+    #[test]
+    fn hidden_cursor_still_resets_and_stops_frames() {
+        let plugin = SmoothCursorPlugin::new();
+        plugin.begin_frame(Some(r(30.0, 2.0)), 0);
+        let _ = plugin.quads(0);
+        let _ = plugin.frame(Some(r(25.0, 2.0)), Shape::Block, 100);
+        assert!(plugin.wants_frames_cached());
+
+        assert_eq!(plugin.frame(None, Shape::Block, 120), None);
+        assert!(
+            !plugin.wants_frames_cached(),
+            "sin cursor no se piden cuadros"
+        );
     }
 }

@@ -586,7 +586,12 @@ mod delete_scenario_tests {
     use super::*;
 
     fn r(c: f32, row: f32) -> CellRect {
-        CellRect { column: c, row, width: 1.0, height: 1.0 }
+        CellRect {
+            column: c,
+            row,
+            width: 1.0,
+            height: 1.0,
+        }
     }
 
     /// Alt+Backspace: el cursor salta varias columnas a la IZQUIERDA. Pasada la
@@ -596,8 +601,8 @@ mod delete_scenario_tests {
     fn word_delete_returns_control_to_the_native_cursor() {
         let t = Tuning::default();
         let mut a = Animator::new();
-        a.observe(Some(r(50.0, 3.0)), 0);          // cursor al final del texto
-        a.observe(Some(r(45.0, 3.0)), 100);        // Alt+Backspace: 5 columnas a la izquierda
+        a.observe(Some(r(50.0, 3.0)), 0); // cursor al final del texto
+        a.observe(Some(r(45.0, 3.0)), 100); // Alt+Backspace: 5 columnas a la izquierda
 
         // Durante la transicion se pinta (interpolando hacia la izquierda).
         assert!(a.overlay(150, &t).is_some());
@@ -620,4 +625,3 @@ mod delete_scenario_tests {
         assert!(!a.needs_animation(50, &t));
     }
 }
-

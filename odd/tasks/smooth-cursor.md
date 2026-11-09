@@ -289,10 +289,15 @@ the next frame animates. Tests:
 `the_frame_that_starts_a_transition_does_not_paint_a_stale_cursor`,
 `the_next_frame_paints_the_animation`. 47 tests green.
 
-**Host-side follow-up (owned by PORT):** reordering `overlay()` before
-`needs_animation()` makes the flag reflect the current frame, which also restores the
-animation on that very first jump. With the current order the plugin fix is correct but
-costs the first jump its animation.
+**Host-side follow-up: DONE by PORT.** They inverted the order (`overlay()` before
+`needs_animation()`) since invocation was already unconditional, so it costs nothing.
+That makes the flag reflect the current frame and the first jump animates.
+
+The plugin-side guard from L36 was therefore reverted: it existed only to survive the old
+order, and keeping it would cost the first jump its animation for no reason. Tests were
+rewritten for the new contract — `the_jump_frame_paints_and_asks_for_another_frame`,
+`the_animation_advances_then_stops`, `hidden_cursor_still_resets_and_stops_frames`.
+48 tests green, clippy and fmt clean.
 
 **L34** (registration landed, verified by reading): PORT master `2518809` (tag `v0.1.13`)
 carries all three code sites: `crates/port-app/Cargo.toml:21`, `main.rs:27` (import) and
