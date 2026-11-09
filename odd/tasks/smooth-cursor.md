@@ -273,6 +273,21 @@ commits into the review, so it was replayed with `git am` onto master.
 merged; whether it rides the same PR is the host owner's call together with the push
 authorization.
 
+**L34** (registration landed, verified by reading): PORT master `2518809` (tag `v0.1.13`)
+carries all three code sites: `crates/port-app/Cargo.toml:21`, `main.rs:27` (import) and
+`:68` (`register`), and the workspace dep at `Cargo.toml:39` pinned by
+`rev = "25aaa7cb9f592364b86edce781483f1daeca210b"`. `Cargo.lock` records
+`?rev=25aaa7cb...`.
+
+**L35** (correction to my own "five sites" warning): the script lists are a **fixed list
+for branch-tracked plugins** — `for pkg in port-plugin-herdr port-plugin-selection`, i.e.
+those declared `branch = "master"`. `smooth-cursor` is pinned by immutable `rev`, so it is
+correctly **absent** from both lists. Furthermore the script's verifier greps the lock for
+`?branch=master#`, which a `rev`-pinned entry never matches, so adding it would have made
+the script's post-condition check meaningless. My earlier claim that forgetting the two
+script sites would cause a Nix hash mismatch applied to herdr/selection, not to this crate.
+The registration is complete as delivered.
+
 **L33** (pushed, verified reachable): `feat/smooth-cursor-plugin-clean` is pushed;
 `git ls-remote` reports `25aaa7cb9f592364b86edce781483f1daeca210b` on the remote, and a
 clone-less `git fetch --depth=1 origin <sha>` resolves it, so cargo can pin it with `rev`.
