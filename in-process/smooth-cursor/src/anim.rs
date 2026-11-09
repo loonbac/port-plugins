@@ -580,3 +580,44 @@ mod tests {
         assert!(ease_out_cubic(0.5) > 0.5);
     }
 }
+
+#[cfg(test)]
+mod delete_scenario_tests {
+    use super::*;
+
+    fn r(c: f32, row: f32) -> CellRect {
+        CellRect { column: c, row, width: 1.0, height: 1.0 }
+    }
+
+    /// Alt+Backspace: el cursor salta varias columnas a la IZQUIERDA. Pasada la
+    /// transicion el plugin debe dejar de pintar y devolver el nativo, o el
+    /// cursor se quedaria clavado a la derecha.
+    #[test]
+    fn word_delete_returns_control_to_the_native_cursor() {
+        let t = Tuning::default();
+        let mut a = Animator::new();
+        a.observe(Some(r(50.0, 3.0)), 0);          // cursor al final del texto
+        a.observe(Some(r(45.0, 3.0)), 100);        // Alt+Backspace: 5 columnas a la izquierda
+
+        // Durante la transicion se pinta (interpolando hacia la izquierda).
+        assert!(a.overlay(150, &t).is_some());
+        assert!(a.needs_animation(150, &t));
+
+        // Cerrada la gracia, NADA: el nativo vuelve a su sitio.
+        assert_eq!(a.overlay(100 + 120 + HANDOFF_GRACE_MS + 1, &t), None);
+        assert!(!a.needs_animation(100 + 120 + HANDOFF_GRACE_MS + 1, &t));
+    }
+
+    /// Borrado sin movimiento de cursor (texto a la derecha): no debe animarse
+    /// nada ni quedarse pintando.
+    #[test]
+    fn delete_at_end_does_not_animate() {
+        let t = Tuning::default();
+        let mut a = Animator::new();
+        a.observe(Some(r(20.0, 1.0)), 0);
+        a.observe(Some(r(20.0, 1.0)), 50);
+        assert_eq!(a.overlay(50, &t), None);
+        assert!(!a.needs_animation(50, &t));
+    }
+}
+
